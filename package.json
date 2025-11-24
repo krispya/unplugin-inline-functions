@@ -1,7 +1,7 @@
 {
-	"name": "esbuild-plugin-inline-functions",
-	"version": "0.2.0",
-	"description": "Esbuild plugin to inline functions in your code.",
+	"name": "unplugin-inline-functions",
+	"version": "0.3.0",
+	"description": "Universal plugin to inline functions in your code. Works with Vite, Rollup, Webpack, esbuild, and more.",
 	"license": "ISC",
 	"type": "module",
 	"main": "./dist/index.cjs",
@@ -15,6 +15,26 @@
 			},
 			"import": "./dist/index.js",
 			"require": "./dist/index.cjs"
+		},
+		"./vite": {
+			"types": "./dist/vite.d.ts",
+			"import": "./dist/vite.js",
+			"require": "./dist/vite.cjs"
+		},
+		"./webpack": {
+			"types": "./dist/webpack.d.ts",
+			"import": "./dist/webpack.js",
+			"require": "./dist/webpack.cjs"
+		},
+		"./rollup": {
+			"types": "./dist/rollup.d.ts",
+			"import": "./dist/rollup.js",
+			"require": "./dist/rollup.cjs"
+		},
+		"./esbuild": {
+			"types": "./dist/esbuild.d.ts",
+			"import": "./dist/esbuild.js",
+			"require": "./dist/esbuild.cjs"
 		}
 	},
 	"files": [
@@ -25,17 +45,21 @@
 		"test": "vitest"
 	},
 	"devDependencies": {
-		"@babel/generator": "^7.26.3",
-		"@babel/parser": "^7.26.3",
-		"@babel/traverse": "^7.26.4",
-		"@babel/types": "^7.26.3",
-		"@types/babel__generator": "^7.6.8",
-		"@types/babel__traverse": "^7.20.6",
+		"@babel/generator": "^7.28.3",
+		"@babel/parser": "^7.28.4",
+		"@babel/traverse": "^7.28.4",
+		"@babel/types": "^7.28.4",
+		"@types/babel__generator": "^7.27.0",
+		"@types/babel__traverse": "^7.28.0",
 		"@types/node": "latest",
-		"chalk": "^5.4.1",
+		"chalk": "^5.6.2",
 		"esbuild": "^0.24.2",
-		"tsup": "^8.3.6",
-		"typescript": "^5.7.3"
+		"rollup": "^4.52.3",
+		"rollup-plugin-esbuild": "^6.2.1",
+		"tsup": "^8.5.0",
+		"typescript": "^5.9.2",
+		"vite": "^6.3.6",
+		"vitest": "^3.2.4"
 	},
 	"peerDependencies": {
 		"@babel/parser": "^7.26.3",
@@ -44,6 +68,12 @@
 	},
 	"packageManager": "pnpm@9.15.3+sha512.1f79bc245a66eb0b07c5d4d83131240774642caaa86ef7d0434ab47c0d16f66b04e21e0c086eb61e62c77efc4d7f7ec071afad3796af64892fae66509173893a",
 	"dependencies": {
-		"vitest": "^3.2.4"
+		"fast-glob": "^3.3.3",
+		"unplugin": "^2.3.10"
+	},
+	"pnpm": {
+		"overrides": {
+			"rollup": "^4.52.3"
+		}
 	}
 }

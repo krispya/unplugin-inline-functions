@@ -1,24 +1,125 @@
-A plugin for [esbuild](https://github.com/evanw/esbuild) that adds support for inlining functions with transpiler hints. C++ has function specifiers and now JS has `esbuild-plugin-inline-functions`.
+# unplugin-inline-functions
+
+A universal plugin that adds support for inlining functions with transpiler hints. Works with **Vite**, **Rollup**, **Webpack**, **esbuild**, and more. C++ has function specifiers and now JS has `unplugin-inline-functions`.
 
 ```bash
-npm i esbuild-plugin-inline-functions
+npm i unplugin-inline-functions
 ```
 
-This plugin can be used anywhere esbuild is, for example with `tsup` as I am in [Koota](https://github.com/pmndrs/koota).
+## Usage
 
-```js
-// tsup.config.ts
-import { defineConfig } from 'tsup';
-import { inlineFunctionsPlugin } from 'esbuild-plugin-inline-functions';
+This plugin works across multiple bundlers. Choose the appropriate import for your build tool:
+
+### Vite
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import inlineFunctions from 'unplugin-inline-functions/vite';
 
 export default defineConfig({
-	entry: ['src/index.ts'],
-	format: ['esm', 'cjs'],
-	esbuildPlugins: [inlineFunctionsPlugin()],
+  plugins: [
+    inlineFunctions({
+      include: ['src/**/*.{js,ts,jsx,tsx}'], // Optional, defaults to src/**
+    }),
+  ],
 });
 ```
 
-### Using `@inline`
+### Rollup
+
+```ts
+// rollup.config.js
+import inlineFunctions from 'unplugin-inline-functions/rollup';
+
+export default {
+  plugins: [
+    inlineFunctions({
+      include: ['src/**/*.{js,ts,jsx,tsx}'],
+    }),
+  ],
+};
+```
+
+### Webpack
+
+```ts
+// webpack.config.js
+module.exports = {
+  plugins: [
+    require('unplugin-inline-functions/webpack')({
+      include: ['src/**/*.{js,ts,jsx,tsx}'],
+    }),
+  ],
+};
+```
+
+### esbuild
+
+```ts
+// esbuild.config.js
+import { build } from 'esbuild';
+import inlineFunctions from 'unplugin-inline-functions/esbuild';
+
+build({
+  plugins: [
+    inlineFunctions({
+      include: ['src/**/*.{js,ts,jsx,tsx}'],
+    }),
+  ],
+});
+```
+
+### tsup
+
+```ts
+// tsup.config.ts
+import { defineConfig } from 'tsup';
+import inlineFunctions from 'unplugin-inline-functions/esbuild';
+
+export default defineConfig({
+  entry: ['src/index.ts'],
+  format: ['esm', 'cjs'],
+  esbuildPlugins: [
+    inlineFunctions({
+      include: ['src/**/*.{js,ts,jsx,tsx}'],
+    }),
+  ],
+});
+```
+
+## Configuration
+
+The plugin accepts the following options:
+
+```ts
+{
+  /**
+   * Glob patterns to include for metadata collection.
+   * These files will be scanned for @inline and @pure decorators.
+   * Similar to tsconfig.json's "include" field.
+   * 
+   * @default ['src/**/*.{js,ts,jsx,tsx}']
+   */
+  include?: string | string[];
+
+  /**
+   * Glob patterns to exclude from metadata collection.
+   * 
+   * @default ['node_modules/**', '**/*.spec.ts', '**/*.test.ts']
+   */
+  exclude?: string | string[];
+
+  /**
+   * Base directory for resolving glob patterns.
+   * 
+   * @default process.cwd()
+   */
+  cwd?: string;
+}
+```
+
+## Using `@inline`
 
 To get started, simply add the `/* @inline */` hint in front of any function declaration.
 
@@ -64,7 +165,7 @@ function displayUserInfo(userId) {
 - Works with arrow functions and regular function declarations
 - Maintains correct variable scoping and execution order
 
-### Optimizing with `@pure`
+## Optimizing with `@pure`
 
 You'll notice the output can have redundant variable reads. For performance-critical code, these redundant reads can get expensive. We want to access data once, but the transpiler needs confidence that values won't change between function calls. Use the `/* @pure */` hint to tell the transpiler the function has no side effects.
 
@@ -135,7 +236,7 @@ function displayUserInfo(userId) {
 }
 ```
 
-### Inverted control flow
+## Inverted control flow
 
 By marking a function with an `@inline` hint, it is inlined for **all** calls, however you might want to inline selectively. This can be done by instead adding the hint to the function call.
 
@@ -166,6 +267,22 @@ Function calls have a cost. They create a new scope, allocate memory and then ne
 
 Sometimes! VMs do an amazing job of optimizing code but ultimately the VM only knows your app one code block at a time and attempts to discover optimizations with built in heuristics. We have the advantage of knowing our own codebase and its hot paths ahead of time so we can help the VM out. We do this by transpiling code to be pre-optimized for the VM. This means instead of hoping the VM's heuristics decide a function is safe to inline, we do it ourselves and the VM has fewer decisions to make.
 
-## What's next?
+## How It Works
 
-This is an experiment I created while I was at the [Recurse Center](https://www.recurse.com/) that turned out more successful than I expected. I have since integrated it into [Koota](https://github.com/pmndrs/koota) where its features are being put to the test. I plan to extract this out into a Babel plugin and make it available for dev as well as production with a Vite plugin. I may look into add other hints oriented at optimizing performance.
+The plugin operates in two phases, similar to how traditional compilers work:
+
+### Phase 1: Metadata Collection (buildStart)
+- Scans all files matching your `include` patterns
+- Parses them to find functions marked with `@inline` and `@pure`
+- Builds a symbol table of inlinable functions and their properties
+
+### Phase 2: Transformation (transform)
+- Processes each file during the build
+- Uses the pre-collected metadata to inline function calls
+- Applies optimizations like deduplication for pure functions
+
+This two-phase approach ensures the plugin has complete knowledge of all inlinable functions before transforming any code, allowing it to correctly inline functions even when they're imported from other files.
+
+## Credits
+
+This is an experiment I created while I was at the [Recurse Center](https://www.recurse.com/) that turned out more successful than I expected. I have since integrated it into [Koota](https://github.com/pmndrs/koota) where its features are being put to the test.
