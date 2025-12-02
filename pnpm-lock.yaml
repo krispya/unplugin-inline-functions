@@ -15,9 +15,6 @@ importers:
       fast-glob:
         specifier: ^3.3.3
         version: 3.3.3
-      tsup:
-        specifier: ^8.5.1
-        version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)
       unplugin:
         specifier: ^2.3.11
         version: 2.3.11
@@ -55,6 +52,9 @@ importers:
       rollup-plugin-esbuild:
         specifier: ^6.2.1
         version: 6.2.1(esbuild@0.25.12)(rollup@4.53.3)
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

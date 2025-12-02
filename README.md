@@ -116,6 +116,24 @@ The plugin accepts the following options:
    * @default process.cwd()
    */
   cwd?: string;
+
+  /**
+   * Enable debug logging to help diagnose issues.
+   * When enabled, logs configuration, file discovery, and transformation details.
+   * 
+   * @default false
+   */
+  debug?: boolean;
+
+  /**
+   * Automatically discover files via `export * from` and `export { ... } from` statements.
+   * When enabled, files matching the include pattern will be scanned for export statements,
+   * and the referenced files will be automatically included in metadata collection.
+   * This is useful when your entry files re-export from other directories.
+   * 
+   * @default true
+   */
+  followExports?: boolean;
 }
 ```
 
