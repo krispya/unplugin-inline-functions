@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildFiles } from './utils/build-files';
+import { buildFilesEsbuild } from './utils/build-esbuild';
 import { resolve } from 'path';
 
 describe('@inline functionality', () => {
 	it('should inline functions marked with @inline decorator across files', async () => {
 		// Build the entry point which imports the inlinable functions
 		const entryPoint = resolve(__dirname, 'fixtures/display-user.js');
-		const result = await buildFiles(entryPoint);
+		const result = await buildFilesEsbuild(entryPoint);
 
 		const transformedCode = result.outputFiles[0].text;
 
@@ -31,7 +31,7 @@ describe('@inline functionality', () => {
 	it('should inline functions called as statements with inverted control flow', async () => {
 		// Build the entry point which imports the inlinable functions
 		const entryPoint = resolve(__dirname, 'fixtures/display-user.js');
-		const result = await buildFiles(entryPoint);
+		const result = await buildFilesEsbuild(entryPoint);
 
 		const transformedCode = result.outputFiles[0].text;
 

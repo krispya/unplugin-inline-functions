@@ -2,7 +2,7 @@ import * as esbuild from 'esbuild';
 import unplugin from '../../src/esbuild';
 import path from 'path';
 
-export async function buildFiles(entryPoint: string) {
+export async function buildFilesEsbuild(entryPoint: string) {
 	return await esbuild.build({
 		entryPoints: [entryPoint],
 		bundle: true,

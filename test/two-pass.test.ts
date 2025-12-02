@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolve } from 'path';
-import { buildFiles as buildFilesEsbuild } from './utils/build-files';
+import { buildFilesEsbuild } from './utils/build-esbuild';
 import { buildFilesWithRollup } from './utils/build-rollup';
 import { buildFilesWithVite } from './utils/build-vite';
 

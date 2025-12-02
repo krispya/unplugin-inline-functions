@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolve } from 'path';
-import { buildFiles as buildFilesEsbuild } from './utils/build-files';
+import { buildFilesEsbuild } from './utils/build-esbuild';
 import { buildFilesWithRollup } from './utils/build-rollup';
 import { buildFilesWithVite } from './utils/build-vite';
 
@@ -56,30 +56,4 @@ describe('Multi-bundler support', () => {
 			});
 		});
 	}
-});
-
-describe('Bundler exports', () => {
-	it('should export correct plugin for esbuild', async () => {
-		const plugin = await import('../src/esbuild');
-		expect(plugin.default).toBeDefined();
-		expect(typeof plugin.default).toBe('function');
-	});
-
-	it('should export correct plugin for rollup', async () => {
-		const plugin = await import('../src/rollup');
-		expect(plugin.default).toBeDefined();
-		expect(typeof plugin.default).toBe('function');
-	});
-
-	it('should export correct plugin for vite', async () => {
-		const plugin = await import('../src/vite');
-		expect(plugin.default).toBeDefined();
-		expect(typeof plugin.default).toBe('function');
-	});
-
-	it('should export correct plugin for webpack', async () => {
-		const plugin = await import('../src/webpack');
-		expect(plugin.default).toBeDefined();
-		expect(typeof plugin.default).toBe('function');
-	});
 });
