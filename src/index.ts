@@ -33,6 +33,13 @@ export interface InlineFunctionsOptions {
 	 * @default process.cwd()
 	 */
 	cwd?: string;
+
+	/**
+	 * Enable debug logging to help diagnose issues.
+	 *
+	 * @default false
+	 */
+	debug?: boolean;
 }
 
 const astCache = new Map<string, any>(); // hash -> ast
@@ -42,13 +49,17 @@ function hashContent(content: string): string {
 	return createHash('md5').update(content).digest('hex');
 }
 
-function findProjectRoot(dir: string): string {
+function findProjectRoot(dir: string, originalDir: string = dir): string {
 	if (fs.existsSync(path.join(dir, 'package.json'))) {
 		return dir;
 	}
 	const parent = path.dirname(dir);
-	if (parent === dir) return dir; // reached filesystem root
-	return findProjectRoot(parent);
+	if (parent === dir) {
+		// Reached filesystem root without finding package.json
+		// Return the original directory instead of filesystem root
+		return originalDir;
+	}
+	return findProjectRoot(parent, originalDir);
 }
 
 export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((options = {}) => {
@@ -56,10 +67,19 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		include = ['src/**/*.{js,ts,jsx,tsx}'],
 		exclude = ['node_modules/**', '**/*.spec.ts', '**/*.test.ts', '**/*.spec.js', '**/*.test.js'],
 		cwd = process.cwd(),
+		debug = false,
 	} = options;
 
 	let initialized = false;
 	const projectRoot = findProjectRoot(cwd);
+
+	if (debug) {
+		console.log(chalk.blue('[unplugin-inline-functions] Debug mode enabled'));
+		console.log(chalk.blue(`  cwd: ${cwd}`));
+		console.log(chalk.blue(`  projectRoot: ${projectRoot}`));
+		console.log(chalk.blue(`  include: ${JSON.stringify(include)}`));
+		console.log(chalk.blue(`  exclude: ${JSON.stringify(exclude)}`));
+	}
 
 	/**
 	 * Scan all files matching the include patterns and collect metadata.
@@ -86,6 +106,16 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 			absolute: true,
 			onlyFiles: true,
 		});
+
+		if (debug) {
+			console.log(chalk.blue(`[unplugin-inline-functions] Found ${files.length} files matching include patterns`));
+			if (files.length === 0) {
+				console.warn(chalk.yellow(`[unplugin-inline-functions] Warning: No files found matching patterns: ${JSON.stringify(includePatterns)}`));
+				console.warn(chalk.yellow(`  Project root: ${projectRoot}`));
+			} else if (files.length <= 10) {
+				console.log(chalk.blue(`  Files: ${files.join(', ')}`));
+			}
+		}
 
 		// Collect metadata from each file
 		for (const filePath of files) {
@@ -157,6 +187,9 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 
 		buildStart() {
 			// Scan all files and collect metadata before transformation starts
+			if (debug) {
+				console.log(chalk.blue('[unplugin-inline-functions] buildStart() called'));
+			}
 			scanAndCollectMetadata();
 		},
 
@@ -168,7 +201,14 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 
 			// Ensure metadata is collected (in case buildStart wasn't called)
 			if (!initialized) {
+				if (debug) {
+					console.warn(chalk.yellow(`[unplugin-inline-functions] Warning: buildStart() was not called, initializing in transform() for file: ${id}`));
+				}
 				scanAndCollectMetadata();
+			}
+
+			if (debug) {
+				console.log(chalk.blue(`[unplugin-inline-functions] Transforming file: ${id}`));
 			}
 
 			const hash = hashContent(code);
