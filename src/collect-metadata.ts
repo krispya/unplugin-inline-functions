@@ -13,8 +13,9 @@ import {
 import { collectDependencyChain, collectLocalDependencies } from './utils/collect-local-dependencies';
 import { hasInlineDecorator, hasPureDecorator } from './utils/decorator-utils';
 import { getFunctionParams } from './utils/get-function-params';
+import { getBabelDefaultExport } from './utils/babel-exports';
 
-const traverse = (_traverse as unknown as { default: typeof _traverse }).default || _traverse;
+const traverse = getBabelDefaultExport(_traverse);
 
 export type InlinableFunction = {
 	name: string;
