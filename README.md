@@ -134,6 +134,26 @@ The plugin accepts the following options:
    * @default true
    */
   followExports?: boolean;
+
+  /**
+   * Automatically discover files via `import` statements.
+   * 
+   * - `false` or `'none'`: Don't follow imports (default)
+   * - `'side-effects'`: Only follow side-effect imports (e.g., `import './patch'`)
+   * - `'all'` or `true`: Follow all relative imports
+   * 
+   * This is useful when files are imported as side-effects (like patch files) or when
+   * you want to discover all imported files, not just those re-exported.
+   * 
+   * @default true
+   * @example
+   * // Only follow side-effect imports (for patch files)
+   * followImports: 'side-effects'
+   * 
+   * // Follow all imports (more aggressive, may discover more files)
+   * followImports: 'all'
+   */
+  followImports?: boolean | 'side-effects' | 'all' | 'none';
 }
 ```
 
