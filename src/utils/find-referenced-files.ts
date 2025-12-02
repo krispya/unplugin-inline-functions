@@ -7,6 +7,7 @@ import { resolveExportPath } from './resolve-export-path';
 const traverse = getBabelDefaultExport(_traverse);
 
 export type FollowImportsOption = boolean | 'side-effects' | 'all' | 'none';
+export type DebugOption = boolean | 'verbose' | undefined;
 
 export interface ReferencedFile {
 	type: 'export *' | 'export {...}' | 'import' | 'import (side-effect)';
@@ -21,7 +22,7 @@ export function findReferencedFiles(
 	ast: any,
 	filePath: string,
 	followImports: FollowImportsOption = false,
-	debug: boolean = false,
+	debug: DebugOption = false,
 	projectRoot: string = process.cwd()
 ): string[] {
 	const referencedFiles: string[] = [];
@@ -77,8 +78,8 @@ export function findReferencedFiles(
 		},
 	});
 
-	if (debug && statements.length > 0) {
-		const relativePath = path.relative(projectRoot, filePath);
+	const isVerbose = debug === 'verbose';
+	if (isVerbose && statements.length > 0) {
 		for (const stmt of statements) {
 			if (stmt.resolved) {
 				const resolvedRelative = path.relative(projectRoot, stmt.resolved);

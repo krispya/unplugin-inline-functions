@@ -5,12 +5,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { findReferencedFiles, FollowImportsOption } from './find-referenced-files';
 
+export type DebugOption = boolean | 'verbose' | undefined;
+
 export interface DiscoveryOptions {
 	projectRoot: string;
 	excludePatterns: string[];
-	debug: boolean;
+	debug: DebugOption;
 	followExports: boolean;
 	followImports: FollowImportsOption;
+}
+
+/**
+ * Check if verbose debug mode is enabled
+ */
+function isVerboseDebug(debug: DebugOption): boolean {
+	return debug === 'verbose';
 }
 
 export interface DiscoveryResult {
@@ -33,7 +42,7 @@ export function discoverFilesViaReferences(
 		return { files, discoveredViaExports };
 	}
 
-	if (debug) {
+	if (isVerboseDebug(debug)) {
 		console.log(chalk.blue('[unplugin-inline-functions] Starting export discovery...'));
 	}
 
@@ -61,7 +70,7 @@ export function discoverFilesViaReferences(
 				projectRoot
 			);
 
-			if (debug && referencedFiles.length > 0) {
+			if (isVerboseDebug(debug) && referencedFiles.length > 0) {
 				const relativePath = path.relative(projectRoot, filePath);
 				console.log(
 					chalk.cyan(
@@ -93,7 +102,7 @@ export function discoverFilesViaReferences(
 					sources.push(filePath);
 					discoveredViaExports.set(referencedFile, sources);
 
-					if (debug) {
+					if (isVerboseDebug(debug)) {
 						const referencedRelative = path.relative(projectRoot, referencedFile);
 						const sourceRelative = path.relative(projectRoot, filePath);
 						console.log(
@@ -102,7 +111,7 @@ export function discoverFilesViaReferences(
 							)
 						);
 					}
-				} else if (debug && !wouldBeIncluded) {
+				} else if (isVerboseDebug(debug) && !wouldBeIncluded) {
 					const referencedRelative = path.relative(projectRoot, referencedFile);
 					console.log(
 						chalk.gray(
@@ -113,7 +122,7 @@ export function discoverFilesViaReferences(
 			}
 		} catch (error) {
 			// Skip files that fail to parse
-			if (debug) {
+			if (isVerboseDebug(debug)) {
 				const relativePath = path.relative(projectRoot, filePath);
 				console.warn(
 					chalk.yellow(
@@ -124,7 +133,7 @@ export function discoverFilesViaReferences(
 		}
 	}
 
-	if (debug) {
+	if (isVerboseDebug(debug)) {
 		console.log(
 			chalk.blue(
 				`[unplugin-inline-functions] Export discovery complete. Discovered ${discoveredViaExports.size} additional file(s).`

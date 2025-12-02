@@ -2,18 +2,34 @@ import _traverse from '@babel/traverse';
 import chalk from 'chalk';
 import fg from 'fast-glob';
 import path from 'node:path';
-import { inlinableFunctions } from '../collect-metadata';
+import { inlinableFunctions, pureFunctions } from '../collect-metadata';
 import { getBabelDefaultExport } from './babel-exports';
 import { hasInlineDecorator } from './decorator-utils';
 
 const traverse = getBabelDefaultExport(_traverse);
+
+export type DebugOption = boolean | 'verbose' | undefined;
 
 export interface DebugLoggingOptions {
 	projectRoot: string;
 	includePatterns: string[];
 	excludePatterns: string[];
 	filesArray: string[];
-	debug: boolean;
+	debug: DebugOption;
+}
+
+/**
+ * Check if debug mode is enabled (either true or 'verbose')
+ */
+function isDebugEnabled(debug: DebugOption): boolean {
+	return debug === true || debug === 'verbose';
+}
+
+/**
+ * Check if verbose debug mode is enabled
+ */
+function isVerboseDebug(debug: DebugOption): boolean {
+	return debug === 'verbose';
 }
 
 /**
@@ -22,7 +38,7 @@ export interface DebugLoggingOptions {
 export function logFileDiscovery(options: DebugLoggingOptions): void {
 	const { projectRoot, includePatterns, excludePatterns, filesArray, debug } = options;
 
-	if (!debug) return;
+	if (!isDebugEnabled(debug)) return;
 
 	const initialCount = fg.sync(includePatterns, {
 		cwd: projectRoot,
@@ -31,24 +47,47 @@ export function logFileDiscovery(options: DebugLoggingOptions): void {
 		onlyFiles: true,
 	}).length;
 	const discoveredCount = filesArray.length - initialCount;
-	console.log(
-		chalk.blue(
-			`[unplugin-inline-functions] Found ${filesArray.length} files matching include patterns${
-				discoveredCount > 0 ? ` (+${discoveredCount} via exports)` : ''
-			}`
-		)
-	);
-	if (filesArray.length === 0) {
-		console.warn(
-			chalk.yellow(
-				`[unplugin-inline-functions] Warning: No files found matching patterns: ${JSON.stringify(
-					includePatterns
-				)}`
+
+	if (isVerboseDebug(debug)) {
+		console.log(
+			chalk.blue(
+				`[unplugin-inline-functions] Found ${
+					filesArray.length
+				} files matching include patterns${
+					discoveredCount > 0 ? ` (+${discoveredCount} via exports)` : ''
+				}`
 			)
 		);
-		console.warn(chalk.yellow(`  Project root: ${projectRoot}`));
-	} else if (filesArray.length <= 10) {
-		console.log(chalk.blue(`  Files: ${filesArray.join(', ')}`));
+		if (filesArray.length === 0) {
+			console.warn(
+				chalk.yellow(
+					`[unplugin-inline-functions] Warning: No files found matching patterns: ${JSON.stringify(
+						includePatterns
+					)}`
+				)
+			);
+			console.warn(chalk.yellow(`  Project root: ${projectRoot}`));
+		} else if (filesArray.length <= 10) {
+			console.log(chalk.blue(`  Files: ${filesArray.join(', ')}`));
+		}
+	} else {
+		// Consolidated mode
+		console.log(
+			chalk.blue(
+				`[unplugin-inline-functions] Found ${filesArray.length} file(s)${
+					discoveredCount > 0 ? ` (+${discoveredCount} discovered)` : ''
+				}`
+			)
+		);
+		if (filesArray.length === 0) {
+			console.warn(
+				chalk.yellow(
+					`[unplugin-inline-functions] Warning: No files found matching patterns: ${JSON.stringify(
+						includePatterns
+					)}`
+				)
+			);
+		}
 	}
 }
 
@@ -60,9 +99,9 @@ export function logMetadataCollectionForFile(
 	ast: any,
 	projectRoot: string,
 	discoveredViaExports: Map<string, string[]>,
-	debug: boolean
+	debug: DebugOption
 ): void {
-	if (!debug) return;
+	if (!isVerboseDebug(debug)) return;
 
 	const wasDiscovered = discoveredViaExports.has(filePath);
 	const relativePath = path.relative(projectRoot, filePath);
@@ -109,13 +148,69 @@ export function logMetadataCollectionForFile(
 /**
  * Log metadata collection summary.
  */
-export function logMetadataCollectionSummary(filesArray: string[], debug: boolean): void {
-	if (!debug) return;
+export function logMetadataCollectionSummary(filesArray: string[], debug: DebugOption): void {
+	if (!isDebugEnabled(debug)) return;
 
 	const totalInlineFunctions = inlinableFunctions.size;
-	console.log(
-		chalk.blue(
-			`[unplugin-inline-functions] Metadata collection complete. Found ${totalInlineFunctions} @inline function(s) across ${filesArray.length} file(s).`
-		)
-	);
+	const totalPureFunctions = pureFunctions.size;
+
+	// Collect all inline function names
+	const inlineFunctionNames = Array.from(inlinableFunctions.keys()).sort();
+
+	// Collect all pure function names
+	const pureFunctionNames = Array.from(pureFunctions).sort();
+
+	// Collect all function names (both inline and pure)
+	const allFunctionNames = Array.from(
+		new Set([...inlineFunctionNames, ...pureFunctionNames])
+	).sort();
+
+	if (isVerboseDebug(debug)) {
+		console.log(
+			chalk.blue(
+				`[unplugin-inline-functions] Metadata collection complete. Found ${totalInlineFunctions} @inline function(s) and ${totalPureFunctions} @pure function(s) across ${filesArray.length} file(s).`
+			)
+		);
+
+		// List all functions with their decorators
+		if (allFunctionNames.length > 0) {
+			console.log(chalk.cyan('\nFunctions:'));
+			for (const name of allFunctionNames) {
+				const tags: string[] = [];
+				if (inlinableFunctions.has(name)) {
+					tags.push(chalk.cyan('[inline]'));
+				}
+				if (pureFunctions.has(name)) {
+					tags.push(chalk.yellow('[pure]'));
+				}
+				const tagsStr = tags.length > 0 ? ` ${tags.join(' ')}` : '';
+				console.log(chalk.cyan(`  ${name}${tagsStr}`));
+			}
+		}
+	} else {
+		// Consolidated mode
+		console.log(
+			chalk.blue(
+				`[unplugin-inline-functions] Found ${totalInlineFunctions} @inline function(s) and ${totalPureFunctions} @pure function(s) in ${filesArray.length} file(s)`
+			)
+		);
+
+		// List all functions with their decorators
+		if (allFunctionNames.length > 0) {
+			const functionList = allFunctionNames
+				.map((name) => {
+					const tags: string[] = [];
+					if (inlinableFunctions.has(name)) {
+						tags.push(chalk.cyan('[inline]'));
+					}
+					if (pureFunctions.has(name)) {
+						tags.push(chalk.yellow('[pure]'));
+					}
+					const tagsStr = tags.length > 0 ? ` ${tags.join(' ')}` : '';
+					return `${chalk.cyan(name)}${tagsStr}`;
+				})
+				.join(', ');
+			console.log(`  ${functionList}`);
+		}
+	}
 }

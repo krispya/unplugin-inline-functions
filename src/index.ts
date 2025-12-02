@@ -43,10 +43,12 @@ export interface InlineFunctionsOptions {
 
 	/**
 	 * Enable debug logging to help diagnose issues.
+	 * - `true`: Shows consolidated summary information
+	 * - `'verbose'`: Shows detailed verbose logging
 	 *
 	 * @default false
 	 */
-	debug?: boolean;
+	debug?: boolean | 'verbose';
 
 	/**
 	 * Automatically discover files via `export * from` and `export { ... } from` statements.
@@ -82,6 +84,20 @@ function hashContent(content: string): string {
 	return createHash('md5').update(content).digest('hex');
 }
 
+/**
+ * Check if debug mode is enabled (either true or 'verbose')
+ */
+function isDebugEnabled(debug: boolean | 'verbose' | undefined): boolean {
+	return debug === true || debug === 'verbose';
+}
+
+/**
+ * Check if verbose debug mode is enabled
+ */
+function isVerboseDebug(debug: boolean | 'verbose' | undefined): boolean {
+	return debug === 'verbose';
+}
+
 export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((options = {}) => {
 	const {
 		include = ['src/**/*.{js,ts,jsx,tsx}'],
@@ -95,14 +111,18 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 	let initialized = false;
 	const projectRoot = findProjectRoot(cwd);
 
-	if (debug) {
-		console.log(chalk.blue('[unplugin-inline-functions] Debug mode enabled'));
-		console.log(chalk.blue(`  cwd: ${cwd}`));
-		console.log(chalk.blue(`  projectRoot: ${projectRoot}`));
-		console.log(chalk.blue(`  include: ${JSON.stringify(include)}`));
-		console.log(chalk.blue(`  exclude: ${JSON.stringify(exclude)}`));
-		console.log(chalk.blue(`  followExports: ${followExports}`));
-		console.log(chalk.blue(`  followImports: ${followImports}`));
+	if (isDebugEnabled(debug)) {
+		if (isVerboseDebug(debug)) {
+			console.log(chalk.blue('[unplugin-inline-functions] Debug mode enabled (verbose)'));
+			console.log(chalk.blue(`  cwd: ${cwd}`));
+			console.log(chalk.blue(`  projectRoot: ${projectRoot}`));
+			console.log(chalk.blue(`  include: ${JSON.stringify(include)}`));
+			console.log(chalk.blue(`  exclude: ${JSON.stringify(exclude)}`));
+			console.log(chalk.blue(`  followExports: ${followExports}`));
+			console.log(chalk.blue(`  followImports: ${followImports}`));
+		} else {
+			console.log(chalk.blue('[unplugin-inline-functions] Debug mode enabled'));
+		}
 	}
 
 	/**
@@ -154,7 +174,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		});
 
 		// Collect metadata from each file
-		if (debug) {
+		if (isVerboseDebug(debug)) {
 			console.log(chalk.blue('[unplugin-inline-functions] Collecting metadata from files...'));
 		}
 
@@ -176,7 +196,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 				logMetadataCollectionForFile(filePath, ast, projectRoot, discoveredViaExports, debug);
 			} catch (error) {
 				// Skip files that fail to parse
-				if (debug) {
+				if (isDebugEnabled(debug)) {
 					const relativePath = path.relative(projectRoot, filePath);
 					console.warn(
 						chalk.yellow(
@@ -242,7 +262,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 
 		buildStart() {
 			// Scan all files and collect metadata before transformation starts
-			if (debug) {
+			if (isVerboseDebug(debug)) {
 				console.log(chalk.blue('[unplugin-inline-functions] buildStart() called'));
 			}
 			scanAndCollectMetadata();
@@ -256,7 +276,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 
 			// Ensure metadata is collected (in case buildStart wasn't called)
 			if (!initialized) {
-				if (debug) {
+				if (isDebugEnabled(debug)) {
 					console.warn(
 						chalk.yellow(
 							`[unplugin-inline-functions] Warning: buildStart() was not called, initializing in transform() for file: ${id}`
@@ -266,7 +286,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 				scanAndCollectMetadata();
 			}
 
-			if (debug) {
+			if (isVerboseDebug(debug)) {
 				console.log(chalk.blue(`[unplugin-inline-functions] Transforming file: ${id}`));
 			}
 

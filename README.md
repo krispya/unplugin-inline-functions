@@ -119,11 +119,19 @@ The plugin accepts the following options:
 
   /**
    * Enable debug logging to help diagnose issues.
-   * When enabled, logs configuration, file discovery, and transformation details.
+   * 
+   * - `true`: Shows consolidated summary information
+   * - `'verbose'`: Shows detailed verbose logging with file-by-file processing details
    * 
    * @default false
+   * @example
+   * // Consolidated mode (summary only)
+   * debug: true
+   * 
+   * // Verbose mode (detailed logging)
+   * debug: 'verbose'
    */
-  debug?: boolean;
+  debug?: boolean | 'verbose';
 
   /**
    * Automatically discover files via `export * from` and `export { ... } from` statements.
