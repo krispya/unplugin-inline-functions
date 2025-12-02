@@ -8,7 +8,7 @@ import inlineFunctions from '../src/esbuild';
 /**
  * Test followImports option for discovering files via import statements.
  */
-describe('followImports option', () => {
+describe('Follow imports option', () => {
 	it('should discover files via side-effect imports when followImports is "side-effects"', async () => {
 		const tempProjectDir = fs.mkdtempSync(path.join(tmpdir(), 'follow-imports-'));
 		const srcDir = path.join(tempProjectDir, 'src');
