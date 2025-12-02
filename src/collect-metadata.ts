@@ -13,8 +13,9 @@ import {
 import { collectDependencyChain, collectLocalDependencies } from './utils/collect-local-dependencies';
 import { hasInlineDecorator, hasPureDecorator } from './utils/decorator-utils';
 import { getFunctionParams } from './utils/get-function-params';
+import { getBabelDefaultExport } from './utils/babel-exports';
 
-const traverse = (_traverse as unknown as { default: typeof _traverse }).default || _traverse;
+const traverse = getBabelDefaultExport(_traverse);
 
 export type InlinableFunction = {
 	name: string;
@@ -29,6 +30,11 @@ export const allFunctions = new Map<string, InlinableFunction>();
 export const inlinableFunctions = new Map<string, InlinableFunction>();
 export const inlinableFunctionCalls = new Map<string, InlinableFunction>();
 export const pureFunctions = new Set<string>();
+
+// Names of functions that have at least one call site annotated with /* @inline */
+// We resolve these to concrete function declarations after all files have been scanned,
+// so that file order does not matter.
+const callsiteInlineCandidates = new Set<string>();
 
 export function collectMetadata(ast: ParseResult<File>) {
 	// Look for any function that has a @inline or @pure decorator.
@@ -115,17 +121,26 @@ export function collectMetadata(ast: ParseResult<File>) {
 					return;
 
 				const name = parent.expression.callee.name;
-				const func = allFunctions.get(name);
-				if (func) inlinableFunctionCalls.set(name, func);
+				callsiteInlineCandidates.add(name);
 			} else {
 				if (!isIdentifier(callee) || !hasInlineDecorator(node)) return;
 
 				const name = callee.name;
-				const func = allFunctions.get(name);
-				if (func) inlinableFunctionCalls.set(name, func);
+				callsiteInlineCandidates.add(name);
 			}
 		},
 	});
+
+	// Resolve any call-site-only inline candidates to concrete function declarations.
+	// This is done after traversing each file so that declaration and usage order
+	// across files does not matter.
+	for (const name of callsiteInlineCandidates) {
+		if (inlinableFunctionCalls.has(name)) continue;
+		const func = allFunctions.get(name);
+		if (func) {
+			inlinableFunctionCalls.set(name, func);
+		}
+	}
 
 	for (const func of inlinableFunctions.values()) {
 		collectDependencyChain(func.name, func.path);
@@ -138,4 +153,5 @@ export function resetMetadata() {
 	inlinableFunctions.clear();
 	inlinableFunctionCalls.clear();
 	pureFunctions.clear();
+	callsiteInlineCandidates.clear();
 }

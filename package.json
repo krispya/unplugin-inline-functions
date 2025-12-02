@@ -1,6 +1,6 @@
 {
 	"name": "unplugin-inline-functions",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Universal plugin to inline functions in your code. Works with Vite, Rollup, Webpack, esbuild, and more.",
 	"license": "ISC",
 	"type": "module",
@@ -45,20 +45,20 @@
 		"test": "vitest"
 	},
 	"devDependencies": {
-		"@babel/generator": "^7.28.3",
-		"@babel/parser": "^7.28.4",
-		"@babel/traverse": "^7.28.4",
-		"@babel/types": "^7.28.4",
+		"@babel/generator": "^7.28.5",
+		"@babel/parser": "^7.28.5",
+		"@babel/traverse": "^7.28.5",
+		"@babel/types": "^7.28.5",
 		"@types/babel__generator": "^7.27.0",
 		"@types/babel__traverse": "^7.28.0",
 		"@types/node": "latest",
 		"chalk": "^5.6.2",
-		"esbuild": "^0.24.2",
-		"rollup": "^4.52.3",
+		"esbuild": "^0.25.10",
+		"rollup": "^4.53.3",
 		"rollup-plugin-esbuild": "^6.2.1",
-		"tsup": "^8.5.0",
-		"typescript": "^5.9.2",
-		"vite": "^6.3.6",
+		"tsup": "^8.5.1",
+		"typescript": "^5.9.3",
+		"vite": "^6.4.1",
 		"vitest": "^3.2.4"
 	},
 	"peerDependencies": {
@@ -69,11 +69,12 @@
 	"packageManager": "pnpm@9.15.3+sha512.1f79bc245a66eb0b07c5d4d83131240774642caaa86ef7d0434ab47c0d16f66b04e21e0c086eb61e62c77efc4d7f7ec071afad3796af64892fae66509173893a",
 	"dependencies": {
 		"fast-glob": "^3.3.3",
-		"unplugin": "^2.3.10"
+		"unplugin": "^2.3.11"
 	},
 	"pnpm": {
 		"overrides": {
-			"rollup": "^4.52.3"
+			"rollup": "^4.52.3",
+			"esbuild": "^0.25.10"
 		}
 	}
 }

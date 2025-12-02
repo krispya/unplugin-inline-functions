@@ -34,14 +34,14 @@ import {
 import { dedupVariables } from './dedup-variables';
 import { STATS } from './stats';
 import { addImportsForDependencies } from './utils/add-import-for-dependencies';
+import { getBabelDefaultExport } from './utils/babel-exports';
 import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
 import { getFunctionBody } from './utils/get-function-body';
 import { getFunctionName } from './utils/get-function-name';
 import { removeImportForFunction } from './utils/remove-import-for-function';
 
-// Depending on the version of babel, the default export may be different.
-const generate = (_generate as unknown as { default: typeof _generate }).default || _generate;
-const traverse = (_traverse as unknown as { default: typeof _traverse }).default || _traverse;
+const generate = getBabelDefaultExport(_generate);
+const traverse = getBabelDefaultExport(_traverse);
 
 export function inlineFunctions(ast: ParseResult<File>) {
 	let uniqueCounter = 0;

@@ -1,10 +1,10 @@
 import _generate from '@babel/generator';
 import _traverse, { NodePath } from '@babel/traverse';
 import { cloneNode, Function, isIdentifier, Node } from '@babel/types';
+import { getBabelDefaultExport } from './utils/babel-exports';
 
-// Depending on the version of babel, the default export may be different.
-const generate = (_generate as unknown as { default: typeof _generate }).default || _generate;
-const traverse = (_traverse as unknown as { default: typeof _traverse }).default || _traverse;
+const generate = getBabelDefaultExport(_generate);
+const traverse = getBabelDefaultExport(_traverse);
 
 export function dedupVariables(transformedFunctions: Map<NodePath<Function>, { isPure: boolean }>) {
 	for (let [functionPath, { isPure }] of transformedFunctions) {

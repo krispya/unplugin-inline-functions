@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildFiles } from './utils/build-files';
+import { buildFilesEsbuild } from './utils/build-esbuild';
 import { resolve } from 'path';
 
 describe('@pure functionality', () => {
 	it('should add #__PURE__ flag to function calls for @pure decorated functions', async () => {
 		// Build the fixture file containing pure functions
 		const fixtureFile = resolve(__dirname, 'fixtures/pure-functions.js');
-		const result = await buildFiles(fixtureFile);
+		const result = await buildFilesEsbuild(fixtureFile);
 
 		const transformedCode = result.outputFiles[0].text;
 
