@@ -12,7 +12,10 @@ export function dedupVariables(transformedFunctions: Map<NodePath<Function>, { i
 
 		const expressionCounts = new Map<string, number>();
 		const variableDeclarations = new Map<string, string>();
-		const firstDeclarationForExpression = new Map<string, string>();
+		const firstDeclarationForExpression = new Map<
+			string,
+			{ name: string; isInIfStatement: boolean }
+		>();
 		const variablesToReplace = new Map<string, string>();
 
 		// Remove duplicate memory access expressions if it is safe to do so.
@@ -52,27 +55,34 @@ export function dedupVariables(transformedFunctions: Map<NodePath<Function>, { i
 					expressionCount++;
 					expressionCounts.set(code, expressionCount);
 
+					// Check if current declaration is inside an if statement
+					let parent: NodePath<Node> | null = path.parentPath;
+					let isInIfStatement = false;
+					while (parent) {
+						if (parent.isIfStatement()) {
+							isInIfStatement = true;
+							break;
+						}
+						parent = parent.parentPath;
+					}
+
 					if (expressionCount > 1) {
 						const firstDeclaration = firstDeclarationForExpression.get(code)!;
 
-						// Check if declaration is inside an if statement
-						let parent: NodePath<Node> | null = path.parentPath;
-						let isInIfStatement = false;
-						while (parent) {
-							if (parent.isIfStatement()) {
-								isInIfStatement = true;
-								break;
+						// Only deduplicate if both declarations are in the same scope
+						if (isInIfStatement === firstDeclaration.isInIfStatement) {
+							// Only deduplicate if both are outside if statements
+							if (!isInIfStatement) {
+								variablesToReplace.set(variableName, firstDeclaration.name);
+								// Remove the declaration from the ast.
+								path.remove();
 							}
-							parent = parent.parentPath;
-						}
-
-						if (!isInIfStatement) {
-							variablesToReplace.set(variableName, firstDeclaration);
-							// Remove the declaration from the ast.
-							path.remove();
 						}
 					} else {
-						firstDeclarationForExpression.set(code, variableName);
+						firstDeclarationForExpression.set(code, {
+							name: variableName,
+							isInIfStatement,
+						});
 					}
 				},
 			},
