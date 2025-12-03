@@ -14,8 +14,9 @@ import {
 	File,
 	Function,
 	identifier,
-	IfStatement,
+	isAssignmentExpression,
 	isBlockStatement,
+	isExpressionStatement,
 	isIdentifier,
 	isMemberExpression,
 	program,
@@ -52,10 +53,10 @@ export function inlineFunctions(ast: ParseResult<File>) {
 		CallExpression(path) {
 			// const callee = path.node.callee;
 			let callee: V8IntrinsicIdentifier | Expression;
-			let isExpressionStatement = false;
+			let isCallExpressionStatement = false;
 
 			if (path.parent.type === 'ExpressionStatement') {
-				isExpressionStatement = true;
+				isCallExpressionStatement = true;
 				callee = (path.parent.expression as CallExpression).callee;
 			} else {
 				callee = path.node.callee;
@@ -90,7 +91,7 @@ export function inlineFunctions(ast: ParseResult<File>) {
 				inlinableFn = inlinableFunctions.get(callee.name)!;
 			} else if (
 				inlinableFunctionCalls.has(callee.name) &&
-				hasInlineDecorator(isExpressionStatement ? path.parent : path.node)
+				hasInlineDecorator(isCallExpressionStatement ? path.parent : path.node)
 			) {
 				inlinableFn = inlinableFunctionCalls.get(callee.name)!;
 			}
@@ -204,20 +205,46 @@ export function inlineFunctions(ast: ParseResult<File>) {
 			traverse(virtualFile, {
 				IfStatement(ifPath) {
 					// Transform if statements that don't have an else branch
+					// BUT only if they contain an early return
 					if (!ifPath.node.alternate) {
-						const container = ifPath.container;
-						if (Array.isArray(container)) {
-							const ifIndex = container.indexOf(ifPath.node);
-							if (ifIndex !== -1) {
-								// Collect all statements that follow this if statement
-								const remainingStatements = container.splice(
-									ifIndex + 1
-								) as Statement[];
-								// Create else block with the remaining statements
-								ifPath.node.alternate = blockStatement(remainingStatements);
-							} else {
-								// Fallback to empty else block if if statement not found
-								ifPath.node.alternate = blockStatement([]);
+						// Check if the consequent contains a result assignment
+						const consequent = ifPath.node.consequent;
+						const consequentBody = isBlockStatement(consequent)
+							? consequent.body
+							: [consequent];
+
+						// Look for result assignment in the consequent
+						let hasResultAssignment = false;
+						for (const stmt of consequentBody) {
+							if (isExpressionStatement(stmt)) {
+								const expr = stmt.expression;
+								if (
+									isAssignmentExpression(expr) &&
+									isIdentifier(expr.left) &&
+									expr.left.name === resultName
+								) {
+									hasResultAssignment = true;
+									break;
+								}
+							}
+						}
+
+						// Only transform if this was an early return
+						if (hasResultAssignment) {
+							const container = ifPath.container;
+							if (Array.isArray(container)) {
+								const ifIndex = container.indexOf(ifPath.node);
+								if (ifIndex !== -1) {
+									// Collect all statements that follow this if statement
+									const remainingStatements = container.splice(
+										ifIndex + 1
+									) as Statement[];
+									// Create else block with the remaining statements
+									ifPath.node.alternate = blockStatement(remainingStatements);
+								} else {
+									// Fallback to empty else block if if statement not found
+									ifPath.node.alternate = blockStatement([]);
+								}
 							}
 						}
 					}
