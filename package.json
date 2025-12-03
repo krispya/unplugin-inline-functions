@@ -1,6 +1,6 @@
 {
 	"name": "unplugin-inline-functions",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"description": "Universal plugin to inline functions in your code. Works with Vite, Rollup, Webpack, esbuild, and more.",
 	"license": "ISC",
 	"type": "module",
