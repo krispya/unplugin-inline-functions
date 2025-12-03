@@ -4,6 +4,7 @@ import _traverse, { NodePath } from '@babel/traverse';
 import {
 	AssignmentExpression,
 	assignmentExpression,
+	BlockStatement,
 	blockStatement,
 	CallExpression,
 	cloneNode,
@@ -40,6 +41,7 @@ import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
 import { getFunctionBody } from './utils/get-function-body';
 import { getFunctionName } from './utils/get-function-name';
 import { removeImportForFunction } from './utils/remove-import-for-function';
+import { detectInlineIfBranch } from './utils/detect-inline-if-branch';
 
 const generate = getBabelDefaultExport(_generate);
 const traverse = getBabelDefaultExport(_traverse);
@@ -129,7 +131,7 @@ export function inlineFunctions(ast: ParseResult<File>) {
 				}
 			});
 
-			// Transform imports.
+			// Transform imports
 			const inlinedImportPath = removeImportForFunction(path, inlinableFn.name);
 			addImportsForDependencies(path, inlinableFn.path, inlinableFn.name, inlinedImportPath);
 
@@ -145,6 +147,27 @@ export function inlineFunctions(ast: ParseResult<File>) {
 			);
 			const virtualFile = file(virtualProgram);
 
+			/**
+			 * We use a two-pass traversal approach to preserve control flow when inlining.
+			 *
+			 * First pass: Normalize the function body
+			 * - Rename variables to avoid conflicts with the caller's scope
+			 * - Replace function parameters with the actual argument expressions
+			 * - Convert return statements to result variable assignments
+			 * - Normalize IfStatement consequents/alternates to BlockStatements
+			 *
+			 * Second pass: Restructure control flow
+			 * - Detect if statements with early returns (by finding result assignments)
+			 * - Transform them by moving following statements into an else block
+			 *
+			 * Post: Replace the function call
+			 * - Single return: Replace call with the return expression directly
+			 * - Multiple returns: Replace call with result variable and prepend declaration
+			 *
+			 * Finally: Insert the transformed statements before the original call site
+			 **/
+
+			// First pass: Normalize
 			traverse(virtualFile, {
 				VariableDeclarator(varPath) {
 					// Rename variables to avoid conflicts.
@@ -202,6 +225,7 @@ export function inlineFunctions(ast: ParseResult<File>) {
 				},
 			});
 
+			// Second pass: Correct control flow
 			traverse(virtualFile, {
 				IfStatement(ifPath) {
 					// Transform if statements that don't have an else branch
@@ -251,40 +275,68 @@ export function inlineFunctions(ast: ParseResult<File>) {
 				},
 			});
 
-			// Transform return statements.
+			/** Post: Transform return statements into variable assignments. */
 			if (returnStatements.length === 1) {
 				const lastReturnStatement = returnStatements[0];
 				// Remove from the inlined body.
 				const index = inlinedBody.body.indexOf(lastReturnStatement);
 				if (index !== -1) inlinedBody.body.splice(index, 1);
 
-				// Replace function call with assignment of the return value to the call identifier.
+				// Replace function call with assignment of the return value to the call identifier
 				const expression =
 					(lastReturnStatement.expression as AssignmentExpression).right ||
 					identifier('undefined');
 				path.replaceWith(expression);
 			} else if (returnStatements.length > 1) {
-				// Prepend our control variables.
+				// Prepend our control variables
 				inlinedBody.body.unshift(
 					variableDeclaration('let', [variableDeclarator(identifier(resultName), null)])
 				);
 
-				// Replace the function call with our result variable.
+				// Replace the function call with our result variable
 				path.replaceWith({ type: 'Identifier', name: resultName });
 			}
 
-			// Insert our transformed code before the original call.
+			/** Finish: Insert our transformed code before the original call. */
 			if (inlinedBody.body.length > 0) {
 				const statementPath = path.getStatementParent();
-				if (statementPath) statementPath.insertBefore(inlinedBody.body);
+				if (statementPath) {
+					const inlineInfo = detectInlineIfBranch(path, statementPath);
+
+					if (inlineInfo.needsWrapping) {
+						const ifNode = inlineInfo.ifNode!;
+						const branch =
+							inlineInfo.branch === 'consequent'
+								? ifNode.consequent
+								: ifNode.alternate!;
+
+						// Wrap the branch in a block
+						if (inlineInfo.branch === 'consequent') {
+							ifNode.consequent = blockStatement([branch]);
+						} else {
+							ifNode.alternate = blockStatement([branch]);
+						}
+
+						// Get the wrapped block and insert into it
+						const branchBlockPath = inlineInfo.ifPath!.get(
+							inlineInfo.branch!
+						) as NodePath<BlockStatement>;
+						const firstStmt = branchBlockPath.get('body')[0];
+						if (firstStmt) {
+							firstStmt.insertBefore(inlinedBody.body);
+							return;
+						}
+					}
+					statementPath.insertBefore(inlinedBody.body);
+				}
 			}
 
-			// If there are no return statements, remove the function call after inlining.
+			// If there are no return statements, remove the function call after inlining
 			if (returnStatements.length === 0) path.remove();
 		},
 	});
 
-	// Remove duplicate memory access expressions if it is safe to do so.
+	// Remove duplicate memory access expressions if it is safe to do so
 	dedupVariables(transformedFunctions);
 
 	const { code } = generate(ast);
