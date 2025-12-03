@@ -122,7 +122,10 @@ export function inlineFunctions(ast: ParseResult<File>) {
 
 			inlinableFn.params.forEach((param, index) => {
 				const expression = path.node.arguments[index];
-				paramMappings.set(param, expression as Expression);
+				// Only store arguments that are actually provided
+				if (expression) {
+					paramMappings.set(param, expression as Expression);
+				}
 			});
 
 			// Transform imports.
@@ -162,8 +165,9 @@ export function inlineFunctions(ast: ParseResult<File>) {
 					}
 
 					// Replace parameters and rename variables assignments.
-					if (paramMappings.has(idPath.node.name)) {
-						idPath.replaceWith(paramMappings.get(idPath.node.name)!);
+					const paramMapping = paramMappings.get(idPath.node.name);
+					if (paramMapping) {
+						idPath.replaceWith(paramMapping);
 					} else if (variableNames.has(idPath.node.name)) {
 						idPath.node.name = variableNames.get(idPath.node.name)!;
 					}
