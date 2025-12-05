@@ -179,6 +179,9 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		}
 
 		for (const filePath of filesArray) {
+			// Skip non-JS/TS files
+			if (!/\.(js|ts|jsx|tsx)$/.test(filePath)) continue;
+
 			try {
 				const contents = fs.readFileSync(filePath, 'utf8');
 				const hash = hashContent(contents);

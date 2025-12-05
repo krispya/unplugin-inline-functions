@@ -54,6 +54,9 @@ export function discoverFilesViaReferences(
 		if (visited.has(filePath)) continue;
 		visited.add(filePath);
 
+		// Skip non-JS/TS files
+		if (!/\.(js|ts|jsx|tsx)$/.test(filePath)) continue;
+
 		try {
 			const contents = fs.readFileSync(filePath, 'utf8');
 			const ast = parse(contents, {
