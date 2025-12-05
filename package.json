@@ -1,7 +1,7 @@
 {
 	"name": "unplugin-inline-functions",
-	"version": "0.3.6",
-	"description": "Universal plugin to inline functions in your code. Works with Vite, Rollup, Webpack, esbuild, and more.",
+	"version": "0.3.7",
+	"description": "Universal plugin to inline functions in your code. Works with Vite, Rollup, Webpack, esbuild, Rolldown, and more.",
 	"license": "ISC",
 	"type": "module",
 	"main": "./dist/index.cjs",
@@ -35,6 +35,11 @@
 			"types": "./dist/esbuild.d.ts",
 			"import": "./dist/esbuild.js",
 			"require": "./dist/esbuild.cjs"
+		},
+		"./rolldown": {
+			"types": "./dist/rolldown.d.ts",
+			"import": "./dist/rolldown.js",
+			"require": "./dist/rolldown.cjs"
 		}
 	},
 	"files": [
