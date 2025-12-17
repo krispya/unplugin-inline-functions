@@ -1,7 +1,8 @@
 import { NodePath } from '@babel/traverse';
 import { getModuleProgram } from './get-module-program';
 import { getFunctionDependencyChain, getFunctionLocalDeps } from './collect-local-dependencies';
-import { createRelativePath, createRelativePathWithRelativePath } from './create-relative-path';
+import { createRelativePath } from './create-relative-path';
+import { resolveExportPath } from './resolve-export-path';
 import {
 	identifier,
 	ImportDeclaration,
@@ -9,6 +10,7 @@ import {
 	importSpecifier,
 	stringLiteral,
 } from '@babel/types';
+import nodePath from 'node:path';
 
 export function addImportsForDependencies(
 	path: NodePath,
@@ -26,7 +28,7 @@ export function addImportsForDependencies(
 			const importPath = dep.fullPath;
 			if (!importPath || !currentPath) continue;
 
-			// Check if the import already exists in the file where transfomed code is.
+			// Check if the import already exists in the file where transformed code is.
 			const importExists = moduleProgram.body.some(
 				(node) =>
 					node.type === 'ImportDeclaration' &&
@@ -52,10 +54,24 @@ export function addImportsForDependencies(
 						node.specifiers.some((spec) => spec.local.name === depName)
 				) as ImportDeclaration;
 
-				relativePath = createRelativePathWithRelativePath(
-					inlinedImport.source.value,
-					inlinedImportPath || ''
-				);
+				// Get the actual source file location of the inlined function
+				const sourceFilePath = inlinePath.node.loc?.filename;
+
+				if (sourceFilePath) {
+					// Resolve the relative import to an absolute path using the source file's directory
+					const sourceDir = nodePath.dirname(sourceFilePath);
+					const resolvedDepPath = resolveExportPath(inlinedImport.source.value, sourceDir);
+
+					if (resolvedDepPath) {
+						// Compute the relative path from the current file to the resolved dependency
+						relativePath = createRelativePath(currentPath, resolvedDepPath);
+					} else {
+						// Fallback: use createRelativePath with the full import path
+						relativePath = createRelativePath(currentPath, importPath);
+					}
+				} else {
+					relativePath = createRelativePath(currentPath, importPath);
+				}
 			} else {
 				relativePath = createRelativePath(currentPath, importPath);
 			}
