@@ -3,6 +3,7 @@ import { getModuleProgram } from './get-module-program';
 import { getFunctionDependencyChain, getFunctionLocalDeps } from './collect-local-dependencies';
 import { createRelativePath } from './create-relative-path';
 import { resolveExportPath } from './resolve-export-path';
+import { inlinableFunctions } from '../collect-metadata';
 import {
 	identifier,
 	ImportDeclaration,
@@ -89,7 +90,10 @@ export function addImportsForDependencies(
 
 	if (dependencyChain.size > 0) {
 		for (const funcName of dependencyChain) {
-			addImportsForDependencies(path, inlinePath, funcName, inlinedImportPath);
+			// Get the actual path for the nested inlined function, not the parent's path
+			const nestedFunc = inlinableFunctions.get(funcName);
+			const nestedInlinePath = nestedFunc?.path ?? inlinePath;
+			addImportsForDependencies(path, nestedInlinePath, funcName, inlinedImportPath);
 		}
 	}
 }
