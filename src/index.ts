@@ -103,7 +103,7 @@ export interface InlineFunctionsOptions {
 	 * - `'workspace'` or `true`: Only follow package imports that resolve to local workspace files
 	 * - `'all'`: Follow any resolvable package import, including node_modules
 	 *
-	 * @default 'workspace'
+	 * @default false
 	 */
 	followPackageImports?: FollowPackageImportsOption;
 
@@ -154,7 +154,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		debug = false,
 		followExports = true,
 		followImports = true,
-		followPackageImports = 'workspace',
+		followPackageImports = false,
 		resolveImport,
 	} = options;
 

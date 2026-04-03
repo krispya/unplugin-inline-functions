@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import inlineFunctions from '../src/esbuild';
 
 describe('module resolution', () => {
-	it('follows local workspace package imports by default', async () => {
+	it('does not follow local workspace package imports by default', async () => {
 		const tempProjectDir = fs.mkdtempSync(path.join(tmpdir(), 'follow-package-imports-'));
 		const appDir = path.join(tempProjectDir, 'packages/app');
 		const libDir = path.join(tempProjectDir, 'packages/lib');
@@ -58,6 +58,23 @@ export function calculate(value: number) {
 		);
 
 		try {
+			const defaultResult = await esbuild.build({
+				entryPoints: [path.join(appSrcDir, 'index.ts')],
+				bundle: true,
+				write: false,
+				format: 'esm',
+				plugins: [
+					inlineFunctions({
+						include: ['src/**/*.{js,ts}'],
+						cwd: appDir,
+						followImports: 'all',
+					}),
+				],
+			});
+
+			const defaultCode = defaultResult.outputFiles[0].text;
+			expect(defaultCode).toContain('helper(');
+
 			const enabledResult = await esbuild.build({
 				entryPoints: [path.join(appSrcDir, 'index.ts')],
 				bundle: true,
@@ -68,6 +85,7 @@ export function calculate(value: number) {
 						include: ['src/**/*.{js,ts}'],
 						cwd: appDir,
 						followImports: 'all',
+						followPackageImports: 'workspace',
 					}),
 				],
 			});
@@ -75,24 +93,6 @@ export function calculate(value: number) {
 			const enabledCode = enabledResult.outputFiles[0].text;
 			expect(enabledCode).not.toContain('helper(');
 			expect(enabledCode).toContain('* 2');
-
-			const disabledResult = await esbuild.build({
-				entryPoints: [path.join(appSrcDir, 'index.ts')],
-				bundle: true,
-				write: false,
-				format: 'esm',
-				plugins: [
-					inlineFunctions({
-						include: ['src/**/*.{js,ts}'],
-						cwd: appDir,
-						followImports: 'all',
-						followPackageImports: false,
-					}),
-				],
-			});
-
-			const disabledCode = disabledResult.outputFiles[0].text;
-			expect(disabledCode).toContain('helper(');
 		} finally {
 			fs.rmSync(tempProjectDir, { recursive: true, force: true });
 		}

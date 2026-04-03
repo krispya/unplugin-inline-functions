@@ -118,6 +118,12 @@ The plugin accepts the following options:
   cwd?: string;
 
   /**
+   * Workspace root for resolving local package imports.
+   * Falls back to an auto-detected workspace root when omitted.
+   */
+  workspaceRoot?: string;
+
+  /**
    * Enable debug logging to help diagnose issues.
    * 
    * - `true`: Shows consolidated summary information
@@ -162,6 +168,17 @@ The plugin accepts the following options:
    * followImports: 'all'
    */
   followImports?: boolean | 'side-effects' | 'all' | 'none';
+
+  /**
+   * Follow bare package imports during discovery.
+   *
+   * - `false`: Never follow package imports
+   * - `'workspace'` or `true`: Only follow package imports that resolve to local workspace files
+   * - `'all'`: Follow any resolvable package import, including node_modules
+   *
+   * @default false
+   */
+  followPackageImports?: boolean | 'workspace' | 'all';
 }
 ```
 
