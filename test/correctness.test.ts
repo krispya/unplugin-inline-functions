@@ -65,7 +65,7 @@ describe('Correctness tests', () => {
 		expect(functionBody).toMatch(processingInElsePattern);
 	});
 
-	it.only('should preserve control flow when inlining multiple functions in conditional branches', async () => {
+	it('should preserve control flow when inlining multiple functions in conditional branches', async () => {
 		const entryPoint = resolve(__dirname, 'fixtures/conditional-inline-bug.js');
 		const result = await buildFilesEsbuild(entryPoint);
 		const transformedCode = result.outputFiles[0].text;
@@ -107,5 +107,25 @@ describe('Correctness tests', () => {
 			/if\s*\(checkCondition\(value\)\)\s*\{[\s\S]*?ctxA[\s\S]*?\}[\s\S]*?ctxB/;
 
 		expect(functionBody).toMatch(correctPattern);
+	});
+
+	it('should not rename substituted argument expressions when a local variable collides', async () => {
+		const entryPoint = resolve(__dirname, 'fixtures/nested-rename-collision/index.ts');
+		const result = await buildFilesEsbuild(entryPoint);
+		const transformedCode = result.outputFiles[0].text;
+
+		// Both inline calls should be inlined
+		expect(transformedCode).not.toMatch(/\bprocess\s*\(/);
+		expect(transformedCode).not.toMatch(/\bresolve\s*\(/);
+
+		// The generated code must not have a self-referential const (TDZ violation).
+		// A broken rename produces: const ctx_N_$f = 'value' in ctx_N_$f ? ctx_N_$f : ...
+		// The RHS of the const initializer must reference the caller's `ctx`, not the renamed local.
+		const selfRefPattern = /const\s+(\w+)\s*=\s*['"]value['"]\s+in\s+\1/;
+		expect(transformedCode).not.toMatch(selfRefPattern);
+
+		// The ternary condition should reference the original caller parameter `ctx`,
+		// not a renamed local like `ctx_N_$f`.
+		expect(transformedCode).toMatch(/"value"\s+in\s+ctx[\s?]/);
 	});
 });

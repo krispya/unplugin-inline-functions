@@ -148,15 +148,18 @@ export function inlineFunctions(ast: ParseResult<File>) {
 			const virtualFile = file(virtualProgram);
 
 			/**
-			 * We use a two-pass traversal approach to preserve control flow when inlining.
+			 * We use a three-pass traversal approach to preserve control flow when inlining.
 			 *
-			 * First pass: Normalize the function body
-			 * - Rename variables to avoid conflicts with the caller's scope
-			 * - Replace function parameters with the actual argument expressions
-			 * - Convert return statements to result variable assignments
-			 * - Normalize IfStatement consequents/alternates to BlockStatements
+			 * First pass: Rename local variables to avoid conflicts with the caller's scope.
+			 * This must happen before parameter substitution so that locals and params are
+			 * still distinct names — no ambiguity about what to rename.
 			 *
-			 * Second pass: Restructure control flow
+			 * Second pass: Substitute function parameters with the caller's argument
+			 * expressions, convert return statements, and normalize if statements.
+			 * Because renaming already completed, the substituted argument expressions
+			 * (which belong to the caller's scope) are never touched by the rename logic.
+			 *
+			 * Third pass: Restructure control flow
 			 * - Detect if statements with early returns (by finding result assignments)
 			 * - Transform them by moving following statements into an else block
 			 *
@@ -167,10 +170,10 @@ export function inlineFunctions(ast: ParseResult<File>) {
 			 * Finally: Insert the transformed statements before the original call site
 			 **/
 
-			// First pass: Normalize
+			// First pass: Rename locals. Params are still their original names so
+			// there is no ambiguity between locals and params.
 			traverse(virtualFile, {
 				VariableDeclarator(varPath) {
-					// Rename variables to avoid conflicts.
 					if (isIdentifier(varPath.node.id)) {
 						const oldName = varPath.node.id.name;
 						const newName = `${oldName}${uniqueSuffix}`;
@@ -179,7 +182,6 @@ export function inlineFunctions(ast: ParseResult<File>) {
 					}
 				},
 				Identifier(idPath) {
-					// Skip renaming if this identifier is a property access
 					if (
 						isMemberExpression(idPath.parent) &&
 						idPath.parentKey === 'property' &&
@@ -188,16 +190,31 @@ export function inlineFunctions(ast: ParseResult<File>) {
 						return;
 					}
 
-					// Replace parameters and rename variables assignments.
-					const paramMapping = paramMappings.get(idPath.node.name);
-					if (paramMapping) {
-						idPath.replaceWith(paramMapping);
-					} else if (variableNames.has(idPath.node.name)) {
+					if (variableNames.has(idPath.node.name)) {
 						idPath.node.name = variableNames.get(idPath.node.name)!;
 					}
 				},
+			});
+
+			// Second pass: Substitute params with caller's arguments, convert
+			// returns to assignments, and normalize if statements.
+			traverse(virtualFile, {
+				Identifier(idPath) {
+					if (
+						isMemberExpression(idPath.parent) &&
+						idPath.parentKey === 'property' &&
+						!idPath.parent.computed
+					) {
+						return;
+					}
+
+					const paramMapping = paramMappings.get(idPath.node.name);
+					if (paramMapping) {
+						idPath.replaceWith(cloneNode(paramMapping, true));
+						idPath.skip();
+					}
+				},
 				ReturnStatement(returnPath) {
-					// Replace return statement with result assignment
 					const returnExpression = expressionStatement(
 						assignmentExpression(
 							'=',
@@ -213,12 +230,10 @@ export function inlineFunctions(ast: ParseResult<File>) {
 					let consequent = ifPath.node.consequent;
 					let alternate = ifPath.node.alternate;
 
-					// Convert consequent to block statement if it isn't already
 					if (!isBlockStatement(consequent)) {
 						ifPath.node.consequent = blockStatement([consequent]);
 					}
 
-					// Convert alternate to block statement if it exists and isn't already
 					if (alternate && !isBlockStatement(alternate)) {
 						ifPath.node.alternate = blockStatement([alternate]);
 					}
