@@ -14,12 +14,12 @@ export function resolveExportPath(sourcePath: string, fromDir: string): string |
 	for (const ext of extensions) {
 		const withExt = resolved + ext;
 		if (fs.existsSync(withExt) && fs.statSync(withExt).isFile()) {
-			return withExt;
+			return fs.realpathSync(withExt);
 		}
 		// Also try /index files
 		const indexPath = path.join(resolved, 'index' + ext);
 		if (fs.existsSync(indexPath) && fs.statSync(indexPath).isFile()) {
-			return indexPath;
+			return fs.realpathSync(indexPath);
 		}
 	}
 

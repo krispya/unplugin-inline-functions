@@ -10,11 +10,17 @@ import { inlineFunctions } from './inline-functions';
 import { STATS } from './stats';
 import { discoverFilesViaReferences } from './utils/discover-files';
 import { findProjectRoot } from './utils/find-project-root';
+import { findWorkspaceRoot } from './utils/find-workspace-root';
 import {
 	logFileDiscovery,
 	logMetadataCollectionForFile,
 	logMetadataCollectionSummary,
 } from './utils/debug-logging';
+import {
+	FollowPackageImportsOption,
+	ResolveImportHook,
+} from './utils/resolve-module-path';
+import { resetResolutionConfig, setResolutionConfig } from './utils/resolution-config';
 
 export interface InlineFunctionsOptions {
 	/**
@@ -40,6 +46,20 @@ export interface InlineFunctionsOptions {
 	 * @default process.cwd()
 	 */
 	cwd?: string;
+
+	/**
+	 * Workspace root for resolving local package imports.
+	 * Falls back to an auto-detected workspace root when omitted.
+	 */
+	workspaceRoot?: string;
+
+	/**
+	 * Alias map used when discovering files and rewriting injected imports.
+	 *
+	 * @example { '@': './src' }
+	 * @example { '@/*': './src/*' }
+	 */
+	alias?: Record<string, string>;
 
 	/**
 	 * Enable debug logging to help diagnose issues.
@@ -75,6 +95,24 @@ export interface InlineFunctionsOptions {
 	 * followImports: 'all'
 	 */
 	followImports?: boolean | 'side-effects' | 'all' | 'none';
+
+	/**
+	 * Follow bare package imports during discovery.
+	 *
+	 * - `false`: Never follow package imports
+	 * - `'workspace'` or `true`: Only follow package imports that resolve to local workspace files
+	 * - `'all'`: Follow any resolvable package import, including node_modules
+	 *
+	 * @default 'workspace'
+	 */
+	followPackageImports?: FollowPackageImportsOption;
+
+	/**
+	 * Custom resolver used by file discovery and injected-import rewriting.
+	 * Return an absolute file path to a source module when the plugin should treat
+	 * an import as local source.
+	 */
+	resolveImport?: ResolveImportHook;
 }
 
 const astCache = new Map<string, any>(); // hash -> ast
@@ -82,6 +120,14 @@ const codeCache = new Map<string, string>(); // hash -> transformed code
 
 function hashContent(content: string): string {
 	return createHash('md5').update(content).digest('hex');
+}
+
+function realpathSafe(filePath: string): string {
+	try {
+		return fs.realpathSync(filePath);
+	} catch {
+		return filePath;
+	}
 }
 
 /**
@@ -103,23 +149,33 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		include = ['src/**/*.{js,ts,jsx,tsx}'],
 		exclude = ['node_modules/**', '**/*.spec.ts', '**/*.test.ts', '**/*.spec.js', '**/*.test.js'],
 		cwd = process.cwd(),
+		workspaceRoot,
+		alias,
 		debug = false,
 		followExports = true,
 		followImports = true,
+		followPackageImports = 'workspace',
+		resolveImport,
 	} = options;
 
 	let initialized = false;
-	const projectRoot = findProjectRoot(cwd);
+	const projectRoot = realpathSafe(findProjectRoot(cwd));
+	const detectedWorkspaceRoot = realpathSafe(workspaceRoot || findWorkspaceRoot(projectRoot));
 
 	if (isDebugEnabled(debug)) {
 		if (isVerboseDebug(debug)) {
 			console.log(chalk.blue('[unplugin-inline-functions] Debug mode enabled (verbose)'));
 			console.log(chalk.blue(`  cwd: ${cwd}`));
 			console.log(chalk.blue(`  projectRoot: ${projectRoot}`));
+			console.log(chalk.blue(`  workspaceRoot: ${detectedWorkspaceRoot}`));
 			console.log(chalk.blue(`  include: ${JSON.stringify(include)}`));
 			console.log(chalk.blue(`  exclude: ${JSON.stringify(exclude)}`));
 			console.log(chalk.blue(`  followExports: ${followExports}`));
 			console.log(chalk.blue(`  followImports: ${followImports}`));
+			console.log(chalk.blue(`  followPackageImports: ${followPackageImports}`));
+			if (alias) {
+				console.log(chalk.blue(`  alias: ${JSON.stringify(alias)}`));
+			}
 		} else {
 			console.log(chalk.blue('[unplugin-inline-functions] Debug mode enabled'));
 		}
@@ -136,8 +192,16 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		// Reset state
 		STATS.reset();
 		resetMetadata();
+		resetResolutionConfig();
 		astCache.clear();
 		codeCache.clear();
+		setResolutionConfig({
+			projectRoot,
+			workspaceRoot: detectedWorkspaceRoot,
+			alias,
+			followPackageImports,
+			resolveImport,
+		});
 
 		// Convert include to array
 		const includePatterns = Array.isArray(include) ? include : [include];
@@ -156,10 +220,14 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		// Discover files via exports and imports if enabled
 		const { files, discoveredViaExports } = discoverFilesViaReferences(initialFiles, {
 			projectRoot,
+			workspaceRoot: detectedWorkspaceRoot,
 			excludePatterns,
 			debug,
 			followExports: followExports || false,
 			followImports,
+			followPackageImports,
+			alias,
+			resolveImport,
 		});
 
 		const filesArray = Array.from(files);

@@ -1,9 +1,10 @@
 import { NodePath } from '@babel/traverse';
+import { inlinableFunctions } from '../collect-metadata';
 import { getModuleProgram } from './get-module-program';
 import { getFunctionDependencyChain, getFunctionLocalDeps } from './collect-local-dependencies';
 import { createRelativePath } from './create-relative-path';
-import { resolveExportPath } from './resolve-export-path';
-import { inlinableFunctions } from '../collect-metadata';
+import { getResolutionConfig } from './resolution-config';
+import { resolveModulePath } from './resolve-module-path';
 import {
 	identifier,
 	ImportDeclaration,
@@ -11,7 +12,6 @@ import {
 	importSpecifier,
 	stringLiteral,
 } from '@babel/types';
-import nodePath from 'node:path';
 
 export function addImportsForDependencies(
 	path: NodePath,
@@ -22,6 +22,7 @@ export function addImportsForDependencies(
 	const moduleProgram = getModuleProgram(path);
 	const localDeps = getFunctionLocalDeps(name);
 	const dependencyChain = getFunctionDependencyChain(name);
+	const resolutionConfig = getResolutionConfig();
 
 	if (localDeps && localDeps.size > 0 && moduleProgram) {
 		for (const [depName, dep] of localDeps) {
@@ -58,20 +59,23 @@ export function addImportsForDependencies(
 				// Get the actual source file location of the inlined function
 				const sourceFilePath = inlinePath.node.loc?.filename;
 
-				if (sourceFilePath) {
-					// Resolve the relative import to an absolute path using the source file's directory
-					const sourceDir = nodePath.dirname(sourceFilePath);
-					const resolvedDepPath = resolveExportPath(inlinedImport.source.value, sourceDir);
+				if (sourceFilePath && resolutionConfig) {
+					const resolution = resolveModulePath(inlinedImport.source.value, sourceFilePath, {
+						projectRoot: resolutionConfig.projectRoot,
+						workspaceRoot: resolutionConfig.workspaceRoot,
+						alias: resolutionConfig.alias,
+						followPackageImports: resolutionConfig.followPackageImports,
+						resolveImport: resolutionConfig.resolveImport,
+					});
 
-					if (resolvedDepPath) {
+					if (resolution.resolved && resolution.isLocal) {
 						// Compute the relative path from the current file to the resolved dependency
-						relativePath = createRelativePath(currentPath, resolvedDepPath);
+						relativePath = createRelativePath(currentPath, resolution.resolved);
 					} else {
-						// Fallback: use createRelativePath with the full import path
-						relativePath = createRelativePath(currentPath, importPath);
+						relativePath = inlinedImport.source.value;
 					}
 				} else {
-					relativePath = createRelativePath(currentPath, importPath);
+					relativePath = inlinedImport.source.value;
 				}
 			} else {
 				relativePath = createRelativePath(currentPath, importPath);

@@ -4,15 +4,23 @@ import fg from 'fast-glob';
 import fs from 'node:fs';
 import path from 'node:path';
 import { findReferencedFiles, FollowImportsOption } from './find-referenced-files';
+import {
+	FollowPackageImportsOption,
+	ResolveImportHook,
+} from './resolve-module-path';
 
 export type DebugOption = boolean | 'verbose' | undefined;
 
 export interface DiscoveryOptions {
 	projectRoot: string;
+	workspaceRoot: string;
 	excludePatterns: string[];
 	debug: DebugOption;
 	followExports: boolean;
 	followImports: FollowImportsOption;
+	followPackageImports: FollowPackageImportsOption;
+	alias?: Record<string, string>;
+	resolveImport?: ResolveImportHook;
 }
 
 /**
@@ -34,11 +42,21 @@ export function discoverFilesViaReferences(
 	initialFiles: Set<string>,
 	options: DiscoveryOptions
 ): DiscoveryResult {
-	const { projectRoot, excludePatterns, debug, followExports, followImports } = options;
+	const {
+		projectRoot,
+		workspaceRoot,
+		excludePatterns,
+		debug,
+		followExports,
+		followImports,
+		followPackageImports,
+		alias,
+		resolveImport,
+	} = options;
 	const discoveredViaExports = new Map<string, string[]>();
 	const files = new Set(initialFiles);
 
-	if (!followExports && followImports === false) {
+	if (!followExports && followImports === false && followPackageImports === false) {
 		return { files, discoveredViaExports };
 	}
 
@@ -70,7 +88,11 @@ export function discoverFilesViaReferences(
 				filePath,
 				followImports,
 				debug,
-				projectRoot
+				projectRoot,
+				workspaceRoot,
+				followPackageImports,
+				alias,
+				resolveImport
 			);
 
 			if (isVerboseDebug(debug) && referencedFiles.length > 0) {
@@ -84,14 +106,14 @@ export function discoverFilesViaReferences(
 
 			for (const referencedFile of referencedFiles) {
 				// Check if file should be excluded
-				const relativePath = path.relative(projectRoot, referencedFile);
+				const relativePath = path.relative(workspaceRoot, referencedFile);
 				const normalizedPath = relativePath.replace(/\\/g, '/'); // Normalize path separators
 
 				// Test if file matches any exclude pattern by checking if it would be included
 				// when we use the exclude patterns as ignore
 				const wouldBeIncluded =
 					fg.sync([normalizedPath], {
-						cwd: projectRoot,
+						cwd: workspaceRoot,
 						ignore: excludePatterns,
 						absolute: false,
 					}).length > 0;
