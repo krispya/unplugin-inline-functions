@@ -228,76 +228,34 @@ function displayUserInfo(userId) {
 - Works with arrow functions and regular function declarations
 - Maintains correct variable scoping and execution order
 
-## Optimizing with `@pure`
+## Read reuse and `@pure`
 
-You'll notice the output can have redundant variable reads. For performance-critical code, these redundant reads can get expensive. We want to access data once, but the transpiler needs confidence that values won't change between function calls. Use the `/* @pure */` hint to tell the transpiler the function has no side effects.
+After inlining, the plugin can reuse repeated reads of known own data properties of fresh local object literals. Reads stay in their original block; the plugin does not hoist them out of branches or loops.
 
 ```js
-export /* @inline @pure */ function getUser(id) {
-    return userCache.get(id) || database.users.find(u => u.id === id);
+/* @inline */ function readX(object) {
+	return object.x;
 }
 
-export /* @inline @pure */ function getUserName(user) {
-    return user?.name || 'Unknown';
+function example() {
+	const object = { x: 1 };
+	const first = readX(object);
+	const second = readX(object);
+	return [first, second];
+}
+
+// Simplified output: one property read, followed by a snapshot alias.
+function example() {
+	const object = { x: 1 };
+	const first = object.x;
+	const second = first;
+	return [first, second];
 }
 ```
 
-With this knowledge the transpiler can safely hoist data reads into single calls.
+The analysis follows lexical bindings and object aliases. It stops reuse at stores, unknown calls or reads, coercions, control-flow boundaries, and suspension. Separate blocks have separate read caches. Arbitrary parameters, getters, proxies, inherited or missing properties, dynamic keys, arrays, and shared memory do not qualify. Allocations and function calls are never deduplicated.
 
-```js
-// Same function calls as before
-function displayUserInfo(userId) {
-    const greeting = `Hello, ${getUserName(getUser(userId))}!`;
-    const status = getUser(userId)?.active ? 'Active' : 'Inactive';
-    return `${greeting} Status: ${status}`;
-}
-```
-
-```js
-// Transpiled with @pure
-function displayUserInfo(userId) {
-    // The duplicate map reads are hoisted
-    const user_0_$f = userCache.get(userId) || database.users.find(u => u.id === userId);  
-    const greeting = `Hello, ${user_0_$f?.name || 'Unknown'}!`;
-    const status = user_0_$f?.active ? 'Active' : 'Inactive';
-    return `${greeting} Status: ${status}`;
-}
-```
-
-Any function call that does not have a `@pure` hint will cause the transpiler to conservatively opt out of hoisting. If these functions are pure, but you don't want to inline them you can still give them the `@pure` hint and the transpiler will know it is safe to hoist values from other inlined functions in the code block.
-
-```js
-// Non-inlined but marked as pure for optimization
-export /* @pure */ function formatUser(user) {
-    return {
-        displayName: user?.name || 'Unknown',
-        isActive: user?.active || false,
-        initials: (user?.name || 'U').charAt(0).toUpperCase()
-    };
-}
-
-function displayUserInfo(userId) {
-    const greeting = `Hello, ${getUserName(getUser(userId))}!`;
-    // Not inlined but marked pure
-    const formatted = formatUser(getUser(userId));  
-    const status = formatted.isActive ? 'Active' : 'Inactive';
-    return `${greeting} Status: ${status}`;
-}
-```
-
-```js
-// Transpiled with pure functions, some inlined
-function displayUserInfo(userId) {
-    // All getUser() calls are hoisted because they're pure
-    const user_0_$f = userCache.get(userId) || database.users.find(u => u.id === userId);
-    
-    const greeting = `Hello, ${user_0_$f?.name || 'Unknown'}!`;
-    // formatUser() is not inlined but marked pure, so hoisting is safe
-    const formatted = formatUser(user_0_$f);  // Reuses hoisted value
-    const status = formatted.isActive ? 'Active' : 'Inactive';
-    return `${greeting} Status: ${status}`;
-}
-```
+`/* @pure */` adds a bundler purity annotation to calls of that function. Use it only when removing an unused call is safe. It does not promise that repeated calls return the same value or that property reads cannot invoke getters. Even annotated calls stop read reuse; the read analysis does not use purity hints as evidence of stability.
 
 ## Inverted control flow
 
@@ -342,7 +300,7 @@ The plugin operates in two phases, similar to how traditional compilers work:
 ### Phase 2: Transformation (transform)
 - Processes each file during the build
 - Uses the pre-collected metadata to inline function calls
-- Applies optimizations like deduplication for pure functions
+- Reuses proven-safe own data reads within straight-line regions of functions changed by inlining
 
 This two-phase approach ensures the plugin has complete knowledge of all inlinable functions before transforming any code, allowing it to correctly inline functions even when they're imported from other files.
 

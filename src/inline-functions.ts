@@ -3,6 +3,7 @@ import { ParseResult } from '@babel/parser';
 import _traverse, { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import { resolveBinding } from './collect-metadata';
+import { dedupVariables } from './dedup-variables';
 import { STATS } from './stats';
 import { getBabelDefaultExport } from './utils/babel-exports';
 import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
@@ -219,7 +220,6 @@ export function inlineFunctions(ast: ParseResult<t.File>) {
 			},
 		},
 	});
-	// The previous text-based deduplication cannot prove mutation or scope safety.
-	// Keep invocation values distinct until a binding-aware optimization pass is available.
+	dedupVariables(transformed.keys());
 	return generate(ast).code;
 }
