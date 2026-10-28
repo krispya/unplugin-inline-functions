@@ -9,7 +9,7 @@ import inlineFunctions from '../src/esbuild';
  * Test followImports option for discovering files via import statements.
  */
 describe('Follow imports option', () => {
-	it('should discover files via side-effect imports when followImports is "side-effects"', async () => {
+	it('does not bind names exported by side-effect imports', async () => {
 		const tempProjectDir = fs.mkdtempSync(path.join(tmpdir(), 'follow-imports-'));
 		const srcDir = path.join(tempProjectDir, 'src');
 		const libDir = path.join(tempProjectDir, 'lib');
@@ -56,9 +56,8 @@ export function calculate(value: number) {
 
 			const code = result.outputFiles[0].text;
 
-			// helper should be inlined
-			expect(code).not.toContain('helper(');
-			expect(code).toContain('* 2');
+			// Loading a module does not put its exported names into the caller's scope.
+			expect(code).toContain('helper(');
 		} finally {
 			fs.rmSync(tempProjectDir, { recursive: true, force: true });
 		}

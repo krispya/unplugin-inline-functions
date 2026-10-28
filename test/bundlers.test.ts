@@ -27,7 +27,7 @@ function assertInlinedFunctions(transformedCode: string) {
 	expect(functionBody).toContain('userCache.get(');
 	expect(functionBody).toContain('database.users.find(');
 	// Optional chaining might be transformed by bundlers, so check for either format
-	expect(functionBody.includes('?.name') || functionBody.includes('_a.name')).toBeTruthy();
+	expect(functionBody).toMatch(/(?:\?\.|\.)name\b/);
 	expect(functionBody).toContain('"Unknown"');
 }
 

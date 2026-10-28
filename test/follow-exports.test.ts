@@ -28,6 +28,7 @@ describe('followExports option', () => {
 		fs.writeFileSync(
 			srcFile,
 			`export * from '../lib/utils';
+import { helper } from '../lib/utils';
 export function calculate(value: number) {
 	return helper(value);
 }`
@@ -46,6 +47,7 @@ export function calculate(value: number) {
 						cwd: tempProjectDir,
 						debug: false,
 						followExports: true, // Explicitly enable
+						followImports: false,
 					}),
 				],
 			});
@@ -86,6 +88,7 @@ export function calculate(value: number) {
 		fs.writeFileSync(
 			srcFile,
 			`export * from '../lib/utils';
+import { helper } from '../lib/utils';
 export function calculate(value: number) {
 	return helper(value);
 }`
@@ -104,6 +107,7 @@ export function calculate(value: number) {
 						cwd: tempProjectDir,
 						debug: false,
 						followExports: false, // Disable
+						followImports: false,
 					}),
 				],
 			});
@@ -137,6 +141,7 @@ export function calculate(value: number) {
 		fs.writeFileSync(
 			srcFile,
 			`export { helper } from '../lib/utils';
+import { helper } from '../lib/utils';
 export function calculate(value: number) {
 	return helper(value);
 }`
@@ -153,6 +158,7 @@ export function calculate(value: number) {
 						include: ['src/**/*.{js,ts}'],
 						cwd: tempProjectDir,
 						followExports: true,
+						followImports: false,
 					}),
 				],
 			});

@@ -16,10 +16,7 @@ import {
 	logMetadataCollectionForFile,
 	logMetadataCollectionSummary,
 } from './utils/debug-logging';
-import {
-	FollowPackageImportsOption,
-	ResolveImportHook,
-} from './utils/resolve-module-path';
+import { FollowPackageImportsOption, ResolveImportHook } from './utils/resolve-module-path';
 import { resetResolutionConfig, setResolutionConfig } from './utils/resolution-config';
 
 export interface InlineFunctionsOptions {
@@ -260,7 +257,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 					sourceFilename: filePath,
 				});
 
-				astCache.set(hash, ast);
+				astCache.set(`${filePath}\0${hash}`, ast);
 				collectMetadata(ast);
 
 				// Log metadata collection for this file
@@ -271,7 +268,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 					const relativePath = path.relative(projectRoot, filePath);
 					console.warn(
 						chalk.yellow(
-							`[unplugin-inline-functions] Failed to parse ${relativePath}: ${error}`
+							`[unplugin-inline-functions] Failed to parse ${relativePath}: ${String(error)}`
 						)
 					);
 				} else {
@@ -330,6 +327,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 
 	return {
 		name: 'unplugin-inline-functions',
+		enforce: 'pre',
 
 		buildStart() {
 			// Scan all files and collect metadata before transformation starts
@@ -361,7 +359,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 				console.log(chalk.blue(`[unplugin-inline-functions] Transforming file: ${id}`));
 			}
 
-			const hash = hashContent(code);
+			const hash = `${realpathSafe(id)}\0${hashContent(code)}`;
 
 			// Return cached result if available
 			if (codeCache.has(hash)) {

@@ -72,15 +72,11 @@ describe('@inline functionality', () => {
 		// The original @inline function call should not appear
 		expect(functionBody).not.toContain('addOneToGeneratedNumber(');
 
-		// Verify the exact structure:
-		// 1. const result_0_$f = generateNumber(); should appear before the return
-		expect(functionBody).toMatch(/const result_0_\$f = generateNumber\(\);/);
-
-		// 2. /* @__PURE__ */ should appear before multiply in the return statement
-		expect(functionBody).toMatch(/return\s+\/\*\s*@__PURE__\s*\*\/\s*multiply\(/);
-
-		// 3. result_0_$f + seed should be inside the multiply call
-		expect(functionBody).toMatch(/multiply\(result_0_\$f\s+\+\s+seed/);
+		// One invocation keeps one random read inside its expression context.
+		expect(functionBody.match(/generateNumber\(\)/g)).toHaveLength(1);
+		expect(functionBody).toContain('return multiply(');
+		// The unannotated multiply binding must not inherit purity from another file.
+		expect(functionBody).not.toMatch(/@__PURE__[^\n]*multiply\(/);
 	});
 
 	it('should inline functions marked with @inline @pure in if statements with separate variable declarations', async () => {
@@ -100,19 +96,9 @@ describe('@inline functionality', () => {
 		// The original @inline function call should not appear
 		expect(functionBody).not.toContain('addOneToGeneratedNumber(');
 
-		// Verify the exact structure:
-		// 1. If block should have its own variable declaration
 		expect(functionBody).toMatch(/if\s*\(\s*seed\s*>\s*0\s*\)\s*\{/);
-		expect(functionBody).toMatch(/const result_1_\$f = generateNumber\(\);/);
-		expect(functionBody).toMatch(/return result_1_\$f\s+\+\s+seed;/);
-
-		// 2. After the if block, there should be a separate variable declaration for the second call
-		expect(functionBody).toMatch(/const result_2_\$f = generateNumber\(\);/);
-
-		// 3. /* @__PURE__ */ should appear before multiply in the return statement
-		expect(functionBody).toMatch(/return\s+\/\*\s*@__PURE__\s*\*\/\s*multiply\(/);
-
-		// 4. result_2_$f + seed should be inside the multiply call
-		expect(functionBody).toMatch(/multiply\(result_2_\$f\s+\+\s+seed/);
+		// Each branch has its own invocation and its own random read.
+		expect(functionBody.match(/generateNumber\(\)/g)).toHaveLength(2);
+		expect(functionBody).toContain('return multiply(');
 	});
 });

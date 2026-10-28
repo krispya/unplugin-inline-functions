@@ -1,343 +1,225 @@
 import _generate from '@babel/generator';
 import { ParseResult } from '@babel/parser';
 import _traverse, { NodePath } from '@babel/traverse';
-import {
-	AssignmentExpression,
-	assignmentExpression,
-	blockStatement,
-	CallExpression,
-	cloneNode,
-	Expression,
-	expressionStatement,
-	ExpressionStatement,
-	file,
-	File,
-	Function,
-	identifier,
-	isAssignmentExpression,
-	isBlockStatement,
-	isExpressionStatement,
-	isIdentifier,
-	isMemberExpression,
-	program,
-	returnStatement,
-	Statement,
-	V8IntrinsicIdentifier,
-	variableDeclaration,
-	variableDeclarator,
-} from '@babel/types';
-import {
-	InlinableFunction,
-	inlinableFunctionCalls,
-	inlinableFunctions,
-	pureFunctions,
-} from './collect-metadata';
-import { dedupVariables } from './dedup-variables';
+import * as t from '@babel/types';
+import { resolveBinding } from './collect-metadata';
 import { STATS } from './stats';
-import { addImportsForDependencies } from './utils/add-import-for-dependencies';
 import { getBabelDefaultExport } from './utils/babel-exports';
 import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
-import { getFunctionBody } from './utils/get-function-body';
 import { getFunctionName } from './utils/get-function-name';
-import { removeImportForFunction } from './utils/remove-import-for-function';
+import {
+	localizeVars,
+	prepareInlineFunction,
+	stableArgument,
+	undefinedValue,
+} from './utils/prepare-inline-function';
 
 const generate = getBabelDefaultExport(_generate);
 const traverse = getBabelDefaultExport(_traverse);
 
-export function inlineFunctions(ast: ParseResult<File>) {
-	let uniqueCounter = 0;
-	const transformedFunctions = new Map<NodePath<Function>, { isPure: boolean }>();
-
-	// Inline all invocations of the inlinable functions.
+/** Expand calls without moving argument evaluation or sharing invocation-local bindings. */
+export function inlineFunctions(ast: ParseResult<t.File>) {
+	const ancestry = new WeakMap<t.Node, Set<string>>();
+	const transformed = new Map<NodePath<t.Function>, boolean>();
+	function mark(node: t.Node, parents: Set<string>) {
+		t.traverseFast(node, (child) => {
+			if (t.isCallExpression(child)) ancestry.set(child, parents);
+		});
+	}
 	traverse(ast, {
-		CallExpression(path) {
-			// const callee = path.node.callee;
-			let callee: V8IntrinsicIdentifier | Expression;
-			let isCallExpressionStatement = false;
+		CallExpression: {
+			exit(path) {
+				if (!t.isIdentifier(path.node.callee)) return;
+				const fn = resolveBinding(path.scope.getBinding(path.node.callee.name));
+				if (!fn) return;
+				if (
+					fn.pure &&
+					!path.node.leadingComments?.some((comment) => comment.value.includes('@__PURE__'))
+				) {
+					t.addComment(path.node, 'leading', '@__PURE__');
+				}
+				if (
+					!fn.inline &&
+					!hasInlineDecorator(path.node) &&
+					!(
+						path.parentPath.isExpressionStatement() &&
+						hasInlineDecorator(path.parentPath.node)
+					)
+				)
+					return;
+				const parents = ancestry.get(path.node) || new Set<string>();
+				if (parents.has(fn.key) || parents.size >= 32) return;
+				const prepared = prepareInlineFunction(path, fn);
+				if (!prepared) return;
+				const { functionPath, imports } = prepared;
+				const original = path.node;
+				const callee = t.cloneNode(path.node.callee);
+				const calleeTarget = t.isFunctionDeclaration(fn.func)
+					? undefined
+					: path.scope.generateUidIdentifier('callee');
+				const next = new Set([...parents, fn.key]);
+				const parentFunction = path.getFunctionParent();
+				const args = original.arguments as t.Expression[];
+				const body = functionPath.node.body;
+				const params = functionPath.node.params as t.Identifier[];
+				let replacement: t.Expression | undefined;
 
-			if (path.parent.type === 'ExpressionStatement') {
-				isCallExpressionStatement = true;
-				callee = (path.parent.expression as CallExpression).callee;
-			} else {
-				callee = path.node.callee;
-			}
-
-			// Only support named function calls -- ie not methods or accessors.
-			if (!isIdentifier(callee)) return;
-
-			// Add /*#__PURE__*/ flags to calls of pure functions (before inlining logic)
-			if (pureFunctions.has(callee.name)) {
-				// Add /*#__PURE__*/ comment before the call
-				if (!path.node.leadingComments) {
-					path.node.leadingComments = [];
+				// Stable inputs and a single return require no invocation frame. The sequence
+				// preserves GetValue semantics (method receivers, indirect eval, delete, names).
+				if (
+					!calleeTarget &&
+					body.body.length === 1 &&
+					t.isReturnStatement(body.body[0]) &&
+					args.every((argument) => stableArgument(argument, path)) &&
+					params.every((param) => functionPath.scope.getBinding(param.name)?.constant)
+				) {
+					for (let index = 0; index < params.length; index++) {
+						const binding = functionPath.scope.getBinding(params[index].name)!;
+						for (const reference of binding.referencePaths)
+							reference.replaceWith(t.cloneNode(args[index] || undefinedValue(), true));
+					}
+					replacement = t.sequenceExpression([
+						t.numericLiteral(0),
+						body.body[0].argument || undefinedValue(),
+					]);
 				}
 
-				// Check if it already has the PURE comment to avoid duplicates
-				const hasPureComment = path.node.leadingComments.some((comment) =>
-					comment.value.includes('@__PURE__')
+				// Keep the original import: other references and module initialization still matter.
+				if (imports.length) {
+					const program = path.scope.getProgramParent().path as NodePath<t.Program>;
+					program.unshiftContainer('body', imports);
+					program.scope.crawl();
+				}
+				STATS.incrementInlinedFunctionCount(fn.name);
+				if (parentFunction) {
+					const pure = (transformed.get(parentFunction) ?? true) && fn.pure;
+					transformed.set(parentFunction, pure);
+					STATS.setTransformedFunction(getFunctionName(parentFunction), pure);
+				}
+				removeDecorators(original);
+				// Argument effects now live inside the expansion. A PURE annotation on a
+				// zero-argument wrapper would incorrectly let bundlers erase those effects.
+				original.leadingComments = original.leadingComments?.filter(
+					(comment) => !/[@#]__PURE__/.test(comment.value)
 				);
-
-				if (!hasPureComment) {
-					path.node.leadingComments.unshift({
-						type: 'CommentBlock',
-						value: '@__PURE__',
-					});
-				}
-			}
-
-			let inlinableFn: InlinableFunction | undefined;
-
-			if (inlinableFunctions.has(callee.name)) {
-				inlinableFn = inlinableFunctions.get(callee.name)!;
-			} else if (
-				inlinableFunctionCalls.has(callee.name) &&
-				hasInlineDecorator(isCallExpressionStatement ? path.parent : path.node)
-			) {
-				inlinableFn = inlinableFunctionCalls.get(callee.name)!;
-			}
-
-			if (!inlinableFn) return;
-
-			// A statement that is the whole body of an if, else or loop is not in a list, so the
-			// inlined statements have nowhere to go beside it. Brace the body and inline the call
-			// when traversal revisits it inside the new block.
-			const ownStatement = path.findParent((p) => p.isStatement());
-			if (
-				ownStatement &&
-				!Array.isArray(ownStatement.container) &&
-				ownStatement.isStatementOrBlock()
-			) {
-				ownStatement.replaceWith(blockStatement([ownStatement.node as Statement]));
-				path.skip();
-				return;
-			}
-
-			STATS.incrementInlinedFunctionCount(inlinableFn.name);
-
-			// Save the transformed parent function.
-			const parentFunction = path.getFunctionParent();
-			if (parentFunction) {
-				STATS.setTransformedFunction(getFunctionName(parentFunction), true);
-
-				if (!transformedFunctions.has(parentFunction)) {
-					transformedFunctions.set(parentFunction, { isPure: true });
+				if (replacement) {
+					mark(replacement, next);
+					path.replaceWith(replacement);
+					return;
 				}
 
-				// Flag as impure if the inlined function is not pure.
-				if (!pureFunctions.has(inlinableFn.name)) {
-					transformedFunctions.set(parentFunction, { isPure: false });
-					STATS.setTransformedFunction(getFunctionName(parentFunction), false);
-				}
-			}
-
-			// Remove decorated leading comments.
-			removeDecorators(path.node);
-
-			// Create a mapping of parameter names to their argument expressions.
-			const paramMappings = new Map<string, Expression>();
-
-			inlinableFn.params.forEach((param, index) => {
-				const expression = path.node.arguments[index];
-				// Only store arguments that are actually provided
-				if (expression) {
-					paramMappings.set(param, expression as Expression);
-				}
-			});
-
-			// Transform imports
-			const inlinedImportPath = removeImportForFunction(path, inlinableFn.name);
-			addImportsForDependencies(path, inlinableFn.path, inlinableFn.name, inlinedImportPath);
-
-			const body = getFunctionBody(inlinableFn.func);
-			const inlinedBody = cloneNode(body, true);
-			const variableNames = new Map<string, string>();
-			const uniqueSuffix = `_${uniqueCounter++}_$f`;
-			const resultName = `result_${callee.name}${uniqueSuffix}`;
-			const returnStatements: ExpressionStatement[] = [];
-
-			const virtualProgram = program(
-				isBlockStatement(inlinedBody) ? inlinedBody.body : [returnStatement(inlinedBody)]
-			);
-			const virtualFile = file(virtualProgram);
-
-			/**
-			 * We use a three-pass traversal approach to preserve control flow when inlining.
-			 *
-			 * First pass: Rename local variables to avoid conflicts with the caller's scope.
-			 * This must happen before parameter substitution so that locals and params are
-			 * still distinct names — no ambiguity about what to rename.
-			 *
-			 * Second pass: Substitute function parameters with the caller's argument
-			 * expressions, convert return statements, and normalize if statements.
-			 * Because renaming already completed, the substituted argument expressions
-			 * (which belong to the caller's scope) are never touched by the rename logic.
-			 *
-			 * Third pass: Restructure control flow
-			 * - Detect if statements with early returns (by finding result assignments)
-			 * - Transform them by moving following statements into an else block
-			 *
-			 * Post: Replace the function call
-			 * - Single return: Replace call with the return expression directly
-			 * - Multiple returns: Replace call with result variable and prepend declaration
-			 *
-			 * Finally: Insert the transformed statements before the original call site
-			 **/
-
-			// First pass: Rename locals. Params are still their original names so
-			// there is no ambiguity between locals and params.
-			traverse(virtualFile, {
-				VariableDeclarator(varPath) {
-					if (isIdentifier(varPath.node.id)) {
-						const oldName = varPath.node.id.name;
-						const newName = `${oldName}${uniqueSuffix}`;
-						variableNames.set(oldName, newName);
-						varPath.node.id.name = newName;
-					}
-				},
-				Identifier(idPath) {
-					if (
-						isMemberExpression(idPath.parent) &&
-						idPath.parentKey === 'property' &&
-						!idPath.parent.computed
-					) {
-						return;
-					}
-
-					if (variableNames.has(idPath.node.name)) {
-						idPath.node.name = variableNames.get(idPath.node.name)!;
-					}
-				},
-			});
-
-			// Second pass: Substitute params with caller's arguments, convert
-			// returns to assignments, and normalize if statements.
-			traverse(virtualFile, {
-				Identifier(idPath) {
-					if (
-						isMemberExpression(idPath.parent) &&
-						idPath.parentKey === 'property' &&
-						!idPath.parent.computed
-					) {
-						return;
-					}
-
-					const paramMapping = paramMappings.get(idPath.node.name);
-					if (paramMapping) {
-						idPath.replaceWith(cloneNode(paramMapping, true));
-						idPath.skip();
-					}
-				},
-				ReturnStatement(returnPath) {
-					const returnExpression = expressionStatement(
-						assignmentExpression(
-							'=',
-							identifier(resultName),
-							returnPath.node.argument || identifier('undefined')
-						)
+				const result = path.scope.generateUidIdentifier('result');
+				const exit = path.scope.generateUidIdentifier('inline');
+				const captured = args.map(() => path.scope.generateUidIdentifier('arg'));
+				const locals = localizeVars(functionPath);
+				functionPath.traverse({
+					Function(path) {
+						path.skip();
+					},
+					ReturnStatement(returnPath) {
+						const value = returnPath.node.argument || undefinedValue();
+						returnPath.replaceWithMultiple([
+							t.expressionStatement(
+								t.assignmentExpression(
+									'=',
+									t.cloneNode(result),
+									t.sequenceExpression([t.numericLiteral(0), value])
+								)
+							),
+							t.breakStatement(t.cloneNode(exit)),
+						]);
+					},
+				});
+				const frame = t.labeledStatement(
+					exit,
+					t.blockStatement([
+						...(calleeTarget
+							? [
+									t.variableDeclaration('const', [
+										t.variableDeclarator(t.cloneNode(calleeTarget), callee),
+									]),
+								]
+							: []),
+						...captured.map((id, index) =>
+							t.variableDeclaration('const', [
+								t.variableDeclarator(
+									id,
+									t.sequenceExpression([
+										t.numericLiteral(0),
+										t.cloneNode(args[index], true),
+									])
+								),
+							])
+						),
+						// A var-backed function can still be uninitialized at this call site. Retain
+						// the native failure after evaluating its arguments, before entering the body.
+						...(calleeTarget
+							? [
+									t.ifStatement(
+										t.binaryExpression(
+											'!==',
+											t.unaryExpression('typeof', t.cloneNode(calleeTarget)),
+											t.stringLiteral('function')
+										),
+										t.expressionStatement(
+											t.callExpression(
+												t.cloneNode(calleeTarget),
+												captured.map((id) => t.cloneNode(id))
+											)
+										)
+									),
+								]
+							: []),
+						...params.map((param, index) =>
+							t.variableDeclaration('let', [
+								t.variableDeclarator(
+									t.cloneNode(param),
+									captured[index] ? t.cloneNode(captured[index]) : undefinedValue()
+								),
+							])
+						),
+						...locals,
+						...body.body,
+					])
+				);
+				const statements = [
+					t.variableDeclaration('let', [t.variableDeclarator(t.cloneNode(result))]),
+					frame,
+				];
+				for (const statement of statements) mark(statement, next);
+				const parent = path.parentPath;
+				if (parent.isExpressionStatement()) {
+					parent.replaceWith(t.blockStatement(statements));
+				} else if (parent.isReturnStatement()) {
+					path.replaceWith(t.cloneNode(result));
+					parent.replaceWithMultiple([...statements, parent.node]);
+				} else if (
+					parent.isVariableDeclarator() &&
+					parent.get('init') === path &&
+					parent.parentPath.isVariableDeclaration() &&
+					parent.parentPath.node.declarations.length === 1 &&
+					parent.parentPath.inList
+				) {
+					const declaration = parent.parentPath;
+					path.replaceWith(t.cloneNode(result));
+					declaration.insertBefore(statements);
+				} else {
+					// Conditional operands, loop headers, multiple declarators and nested arguments
+					// must execute at the original expression position, with fresh block bindings.
+					const wrapper = t.callExpression(
+						t.arrowFunctionExpression(
+							[],
+							t.blockStatement([...statements, t.returnStatement(t.cloneNode(result))])
+						),
+						[]
 					);
-
-					returnPath.replaceWith(returnExpression);
-					returnStatements.push(returnExpression);
-				},
-				IfStatement(ifPath) {
-					let consequent = ifPath.node.consequent;
-					let alternate = ifPath.node.alternate;
-
-					if (!isBlockStatement(consequent)) {
-						ifPath.node.consequent = blockStatement([consequent]);
-					}
-
-					if (alternate && !isBlockStatement(alternate)) {
-						ifPath.node.alternate = blockStatement([alternate]);
-					}
-				},
-			});
-
-			// Second pass: Correct control flow
-			traverse(virtualFile, {
-				IfStatement(ifPath) {
-					// Transform if statements that don't have an else branch
-					// BUT only if they contain an early return
-					if (!ifPath.node.alternate) {
-						// Check if the consequent contains a result assignment
-						const consequent = ifPath.node.consequent;
-						const consequentBody = isBlockStatement(consequent)
-							? consequent.body
-							: [consequent];
-
-						// Look for result assignment in the consequent
-						let hasResultAssignment = false;
-						for (const stmt of consequentBody) {
-							if (isExpressionStatement(stmt)) {
-								const expr = stmt.expression;
-								if (
-									isAssignmentExpression(expr) &&
-									isIdentifier(expr.left) &&
-									expr.left.name === resultName
-								) {
-									hasResultAssignment = true;
-									break;
-								}
-							}
-						}
-
-						// Only transform if this was an early return
-						if (hasResultAssignment) {
-							const container = ifPath.container;
-							if (Array.isArray(container)) {
-								const ifIndex = container.indexOf(ifPath.node);
-								if (ifIndex !== -1) {
-									// Collect all statements that follow this if statement
-									const remainingStatements = container.splice(
-										ifIndex + 1
-									) as Statement[];
-									// Create else block with the remaining statements
-									ifPath.node.alternate = blockStatement(remainingStatements);
-								} else {
-									// Fallback to empty else block if if statement not found
-									ifPath.node.alternate = blockStatement([]);
-								}
-							}
-						}
-					}
-				},
-			});
-
-			/** Post: Transform return statements into variable assignments. */
-			if (returnStatements.length === 1) {
-				const lastReturnStatement = returnStatements[0];
-				// Remove from the inlined body.
-				const index = inlinedBody.body.indexOf(lastReturnStatement);
-				if (index !== -1) inlinedBody.body.splice(index, 1);
-
-				// Replace function call with assignment of the return value to the call identifier
-				const expression =
-					(lastReturnStatement.expression as AssignmentExpression).right ||
-					identifier('undefined');
-				path.replaceWith(expression);
-			} else if (returnStatements.length > 1) {
-				// Prepend our control variables
-				inlinedBody.body.unshift(
-					variableDeclaration('let', [variableDeclarator(identifier(resultName), null)])
-				);
-
-				// Replace the function call with our result variable
-				path.replaceWith({ type: 'Identifier', name: resultName });
-			}
-
-			/** Finish: Insert our transformed code before the original call. */
-			if (inlinedBody.body.length > 0) {
-				path.getStatementParent()?.insertBefore(inlinedBody.body);
-			}
-
-			// If there are no return statements, remove the function call after inlining
-			if (returnStatements.length === 0) path.remove();
+					mark(wrapper, next);
+					path.replaceWith(wrapper);
+				}
+			},
 		},
 	});
-
-	// Remove duplicate memory access expressions if it is safe to do so
-	dedupVariables(transformedFunctions);
-
-	const { code } = generate(ast);
-	return code;
+	// The previous text-based deduplication cannot prove mutation or scope safety.
+	// Keep invocation values distinct until a binding-aware optimization pass is available.
+	return generate(ast).code;
 }
