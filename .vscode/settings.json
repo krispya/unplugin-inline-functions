@@ -1,0 +1,19 @@
+{
+	"biome.enabled": false,
+	"editor.defaultFormatter": "esbenp.prettier-vscode",
+	"editor.detectIndentation": false,
+	"editor.formatOnSave": true,
+	"editor.insertSpaces": false,
+	"editor.tabSize": 4,
+	"eslint.enable": false,
+	"explorer.fileNesting.enabled": true,
+	"explorer.fileNesting.expand": false,
+	"explorer.fileNesting.patterns": {
+		".gitignore": ".gitattributes",
+		"AGENTS.md": "CLAUDE.md",
+		"package.json": "pnpm-lock.yaml, pnpm-workspace.yaml"
+	},
+	"files.eol": "\n",
+	"files.insertFinalNewline": true,
+	"oxc.enable": true
+}

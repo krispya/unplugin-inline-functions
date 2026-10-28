@@ -9,6 +9,7 @@ import {
 	isIfStatement,
 	isReturnStatement,
 	isVariableDeclaration,
+	isVoidPattern,
 	numericLiteral,
 	sequenceExpression,
 	Statement,
@@ -62,6 +63,10 @@ export function convertStatementToExpression(
 		return sequenceExpression(
 			statement.declarations.map((declaration) => {
 				let id = declaration.id;
+
+				if (isVoidPattern(id)) {
+					return declaration.init || unaryExpression('void', numericLiteral(0));
+				}
 
 				if (isIdentifier(declaration.id) && localVars.has(declaration.id.name)) {
 					id = identifier(declaration.id.name + suffix);

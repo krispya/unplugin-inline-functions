@@ -1,7 +1,16 @@
+# managed:start
+node_modules
+dist
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.pnpm-store
+# managed:end
+
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-node_modules
 .pnp
 .pnp.js
 
@@ -33,7 +42,6 @@ yarn-error.log*
 .turbo
 
 # dist
-dist
 
 # react
 packages/publish/react/

@@ -1,0 +1,16 @@
+pmOnFail: download
+
+packages:
+    - '.config/*'
+    - 'apps/*'
+    - 'packages/*'
+
+allowBuilds:
+    esbuild: true
+
+overrides:
+    rollup: ^4.52.3
+    esbuild: ^0.25.10
+
+minimumReleaseAgeExclude:
+    - tsdown@0.23.3

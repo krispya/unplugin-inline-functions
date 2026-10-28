@@ -46,8 +46,13 @@
 		"dist"
 	],
 	"scripts": {
-		"build": "tsup",
-		"test": "vitest"
+		"build": "tsdown",
+		"test": "vitest",
+		"typecheck": "tsc --build --noEmit",
+		"typecheck:watch": "tsc --build --watch --noEmit",
+		"release": "pnpm run build && pnpm publish",
+		"lint": "oxlint",
+		"format": "prettier --write ."
 	},
 	"devDependencies": {
 		"@babel/generator": "^7.28.5",
@@ -59,10 +64,13 @@
 		"@types/node": "latest",
 		"chalk": "^5.6.2",
 		"esbuild": "^0.25.10",
+		"oxlint": "^1.90.0",
+		"oxlint-tsgolint": "^7.0.2005",
+		"prettier": "^3.9.10",
 		"rollup": "^4.53.3",
 		"rollup-plugin-esbuild": "^6.2.1",
-		"tsup": "^8.5.1",
-		"typescript": "^5.9.3",
+		"tsdown": "0.23.3",
+		"typescript": "7.0.2",
 		"vite": "^6.4.1",
 		"vitest": "^3.2.4"
 	},
@@ -71,15 +79,13 @@
 		"@babel/traverse": "^7.26.4",
 		"@babel/types": "^7.26.3"
 	},
-	"packageManager": "pnpm@9.15.3+sha512.1f79bc245a66eb0b07c5d4d83131240774642caaa86ef7d0434ab47c0d16f66b04e21e0c086eb61e62c77efc4d7f7ec071afad3796af64892fae66509173893a",
+	"packageManager": "pnpm@12.16.1",
 	"dependencies": {
 		"fast-glob": "^3.3.3",
 		"unplugin": "^2.3.11"
 	},
-	"pnpm": {
-		"overrides": {
-			"rollup": "^4.52.3",
-			"esbuild": "^0.25.10"
-		}
+	"engines": {
+		"pnpm": ">=12.0.0",
+		"node": ">=22.13"
 	}
 }
