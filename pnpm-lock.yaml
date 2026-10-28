@@ -195,6 +195,9 @@ importers:
 
   .:
     dependencies:
+      '@babel/generator':
+        specifier: ^7.28.5
+        version: 7.28.5
       fast-glob:
         specifier: ^3.3.3
         version: 3.3.3
@@ -202,9 +205,6 @@ importers:
         specifier: ^2.3.11
         version: 2.3.11
     devDependencies:
-      '@babel/generator':
-        specifier: ^7.28.5
-        version: 7.28.5
       '@babel/parser':
         specifier: ^7.28.5
         version: 7.28.5

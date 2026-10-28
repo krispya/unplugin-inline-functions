@@ -1,6 +1,6 @@
 {
 	"name": "unplugin-inline-functions",
-	"version": "0.4.2",
+	"version": "0.5.0",
 	"description": "Universal plugin to inline functions in your code. Works with Vite, Rollup, Webpack, esbuild, Rolldown, and more.",
 	"license": "ISC",
 	"type": "module",
@@ -55,7 +55,6 @@
 		"format": "prettier --write ."
 	},
 	"devDependencies": {
-		"@babel/generator": "^7.28.5",
 		"@babel/parser": "^7.28.5",
 		"@babel/traverse": "^7.28.5",
 		"@babel/types": "^7.28.5",
@@ -81,6 +80,7 @@
 	},
 	"packageManager": "pnpm@12.16.1",
 	"dependencies": {
+		"@babel/generator": "^7.28.5",
 		"fast-glob": "^3.3.3",
 		"unplugin": "^2.3.11"
 	},
