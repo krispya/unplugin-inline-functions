@@ -1,6 +1,6 @@
 import _generate from '@babel/generator';
 import { ParseResult } from '@babel/parser';
-import _traverse, { NodePath } from '@babel/traverse';
+import _traverse, { NodePath, Scope } from '@babel/traverse';
 import * as t from '@babel/types';
 import { resolveBinding } from './collect-metadata';
 import { dedupVariables } from './dedup-variables';
@@ -11,6 +11,7 @@ import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
 import { getFunctionName } from './utils/get-function-name';
 import {
 	localizeVars,
+	leadingSingleUse,
 	prepareInlineFunction,
 	stableArgument,
 	undefinedValue,
@@ -23,6 +24,21 @@ const traverse = getBabelDefaultExport(_traverse);
 export function inlineFunctions(ast: ParseResult<t.File>) {
 	const ancestry = new WeakMap<t.Node, Set<string>>();
 	const transformed = new Map<NodePath<t.Function>, boolean>();
+	const initializedSnapshots = new WeakSet<t.Identifier>();
+	// Scope crawls discard UID reservations for labels in nested blocks. Keep an
+	// independent reservation set for the lifetime of this module's transformation.
+	const labels = new Set<string>();
+	t.traverseFast(ast, (node) => {
+		if (t.isLabeledStatement(node)) labels.add(node.label.name);
+	});
+	function newLabel(scope: Scope, name: string) {
+		let label: t.Identifier;
+		do {
+			label = scope.generateUidIdentifier(name);
+		} while (labels.has(label.name));
+		labels.add(label.name);
+		return label;
+	}
 	function mark(node: t.Node, parents: Set<string>) {
 		t.traverseFast(node, (child) => {
 			if (t.isCallExpression(child)) ancestry.set(child, parents);
@@ -51,7 +67,9 @@ export function inlineFunctions(ast: ParseResult<t.File>) {
 					return;
 				const parents = ancestry.get(path.node) || new Set<string>();
 				if (parents.has(fn.key) || parents.size >= 32) return;
-				const prepared = prepareInlineFunction(path, fn);
+				const prepared = prepareInlineFunction(path, fn, (name) =>
+					newLabel(path.scope, name)
+				);
 				if (!prepared) return;
 				const { functionPath, imports } = prepared;
 				const original = path.node;
@@ -66,31 +84,64 @@ export function inlineFunctions(ast: ParseResult<t.File>) {
 				const params = functionPath.node.params as t.Identifier[];
 				let replacement: t.Expression | undefined;
 
-				// Stable inputs and a single return require no invocation frame. The sequence
-				// preserves GetValue semantics (method receivers, indirect eval, delete, names).
+				// Stable inputs or one leading, single-use input require no invocation frame.
+				// Sequences preserve GetValue semantics (receivers, indirect eval, delete, names).
+				const isStable = (argument: t.Expression) =>
+					stableArgument(argument, path, initializedSnapshots);
+				const stableInputs = args.every(isStable);
 				if (
-					!calleeTarget &&
 					body.body.length === 1 &&
 					t.isReturnStatement(body.body[0]) &&
-					args.every((argument) => stableArgument(argument, path)) &&
+					(stableInputs ||
+						(args.length > 0 &&
+							params.length > 0 &&
+							args.slice(1).every(isStable) &&
+							leadingSingleUse(
+								body.body[0].argument,
+								functionPath.scope.getBinding(params[0].name)!
+							))) &&
 					params.every((param) => functionPath.scope.getBinding(param.name)?.constant)
 				) {
 					for (let index = 0; index < params.length; index++) {
 						const binding = functionPath.scope.getBinding(params[index].name)!;
-						for (const reference of binding.referencePaths)
-							reference.replaceWith(t.cloneNode(args[index] || undefinedValue(), true));
+						for (const reference of binding.referencePaths) {
+							const argument = t.cloneNode(args[index] || undefinedValue(), true);
+							reference.replaceWith(
+								stableInputs
+									? argument
+									: t.sequenceExpression([t.numericLiteral(0), argument])
+							);
+						}
 					}
 					replacement = t.sequenceExpression([
 						t.numericLiteral(0),
 						body.body[0].argument || undefinedValue(),
 					]);
+					if (calleeTarget) {
+						// Expression substitution needs no frame, but a variable-backed
+						// callee can still be uninitialized. Keep its native failure path.
+						replacement = t.conditionalExpression(
+							t.binaryExpression(
+								'===',
+								t.unaryExpression('typeof', t.cloneNode(callee)),
+								t.stringLiteral('function')
+							),
+							replacement,
+							t.callExpression(
+								t.cloneNode(callee),
+								args.map((arg) => t.cloneNode(arg, true))
+							)
+						);
+					}
 				}
 
 				// Keep the original import: other references and module initialization still matter.
 				if (imports.length) {
 					const program = path.scope.getProgramParent().path as NodePath<t.Program>;
-					program.unshiftContainer('body', imports);
-					program.scope.crawl();
+					// Register only the injected imports. A full crawl would discard the UID
+					// reservations for invocation locals that have not been inserted yet.
+					for (const declaration of program.unshiftContainer('body', imports))
+						program.scope.registerDeclaration(declaration);
 				}
 				STATS.incrementInlinedFunctionCount(fn.name);
 				if (parentFunction) {
@@ -111,8 +162,20 @@ export function inlineFunctions(ast: ParseResult<t.File>) {
 				}
 
 				const result = path.scope.generateUidIdentifier('result');
-				const exit = path.scope.generateUidIdentifier('inline');
+				const exit = newLabel(path.scope, 'inline');
 				const captured = args.map(() => path.scope.generateUidIdentifier('arg'));
+				for (const id of captured) initializedSnapshots.add(id);
+				const parameterDeclarations = params.map((param, index) => {
+					const id = t.cloneNode(param);
+					const constant = functionPath.scope.getBinding(param.name)?.constant;
+					if (constant) initializedSnapshots.add(id);
+					return t.variableDeclaration(constant ? 'const' : 'let', [
+						t.variableDeclarator(
+							id,
+							captured[index] ? t.cloneNode(captured[index]) : undefinedValue()
+						),
+					]);
+				});
 				const locals = localizeVars(functionPath);
 				functionPath.traverse({
 					Function(path) {
@@ -172,14 +235,7 @@ export function inlineFunctions(ast: ParseResult<t.File>) {
 									),
 								]
 							: []),
-						...params.map((param, index) =>
-							t.variableDeclaration('let', [
-								t.variableDeclarator(
-									t.cloneNode(param),
-									captured[index] ? t.cloneNode(captured[index]) : undefinedValue()
-								),
-							])
-						),
+						...parameterDeclarations,
 						...locals,
 						...body.body,
 					])

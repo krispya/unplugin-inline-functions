@@ -187,8 +187,9 @@ export function resolveBinding(
 	const declaration = specifier.parentPath;
 	if (!declaration.isImportDeclaration() || declaration.node.importKind === 'type') return;
 	if (specifier.isImportSpecifier() && specifier.node.importKind === 'type') return;
+	// Injected imports retain source locations but their specifiers belong to the caller.
 	const filename =
-		declaration.node.loc?.filename || binding.scope.getProgramParent().path.node.loc?.filename;
+		binding.scope.getProgramParent().path.node.loc?.filename || declaration.node.loc?.filename;
 	const source = filename && resolveSource(declaration.node.source.value, filename);
 	if (!source) return;
 	const imported = specifier.isImportDefaultSpecifier()
