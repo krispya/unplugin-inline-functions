@@ -257,6 +257,25 @@ The analysis follows lexical bindings and object aliases. It stops reuse at stor
 
 `/* @pure */` adds a bundler purity annotation to calls of that function. Use it only when removing an unused call is safe. It does not promise that repeated calls return the same value or that property reads cannot invoke getters. Even annotated calls stop read reuse; the read analysis does not use purity hints as evidence of stability.
 
+## Eliminating overwritten writes
+
+In functions changed by inlining, the plugin also removes stores overwritten before any read in the same straight-line region:
+
+```js
+// Before
+const object = { x: 0 };
+object.x = 1;
+object.x = 2;
+```
+
+```js
+// After: the last store remains.
+const object = { x: 0 };
+object.x = 2;
+```
+
+Candidates are standalone `=` assignments to initialized local `let`/`var` bindings or proven writable own data properties. Overwritten local initializers can also be removed while retaining the declaration. Both the target evaluation and discarded RHS must have no observable effects. Reads of the old value, unknown operations, calls, suspension, and control-flow boundaries retain preceding stores. Getters, setters, proxies, inherited properties, dynamic keys, arrays, shared memory, updates, compound/logical assignments, and assignments used as values are excluded.
+
 ## Inverted control flow
 
 By marking a function with an `@inline` hint, it is inlined for **all** calls, however you might want to inline selectively. This can be done by instead adding the hint to the function call.
