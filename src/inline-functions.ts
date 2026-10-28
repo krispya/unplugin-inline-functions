@@ -4,7 +4,6 @@ import _traverse, { NodePath } from '@babel/traverse';
 import {
 	AssignmentExpression,
 	assignmentExpression,
-	BlockStatement,
 	blockStatement,
 	CallExpression,
 	cloneNode,
@@ -41,7 +40,6 @@ import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
 import { getFunctionBody } from './utils/get-function-body';
 import { getFunctionName } from './utils/get-function-name';
 import { removeImportForFunction } from './utils/remove-import-for-function';
-import { detectInlineIfBranch } from './utils/detect-inline-if-branch';
 
 const generate = getBabelDefaultExport(_generate);
 const traverse = getBabelDefaultExport(_traverse);
@@ -99,6 +97,21 @@ export function inlineFunctions(ast: ParseResult<File>) {
 			}
 
 			if (!inlinableFn) return;
+
+			// A statement that is the whole body of an if, else or loop is not in a list, so the
+			// inlined statements have nowhere to go beside it. Brace the body and inline the call
+			// when traversal revisits it inside the new block.
+			const ownStatement = path.findParent((p) => p.isStatement());
+			if (
+				ownStatement &&
+				!Array.isArray(ownStatement.container) &&
+				ownStatement.isStatementOrBlock()
+			) {
+				ownStatement.replaceWith(blockStatement([ownStatement.node as Statement]));
+				path.skip();
+				return;
+			}
+
 			STATS.incrementInlinedFunctionCount(inlinableFn.name);
 
 			// Save the transformed parent function.
@@ -314,36 +327,7 @@ export function inlineFunctions(ast: ParseResult<File>) {
 
 			/** Finish: Insert our transformed code before the original call. */
 			if (inlinedBody.body.length > 0) {
-				const statementPath = path.getStatementParent();
-				if (statementPath) {
-					const inlineInfo = detectInlineIfBranch(path, statementPath);
-
-					if (inlineInfo.needsWrapping) {
-						const ifNode = inlineInfo.ifNode!;
-						const branch =
-							inlineInfo.branch === 'consequent'
-								? ifNode.consequent
-								: ifNode.alternate!;
-
-						// Wrap the branch in a block
-						if (inlineInfo.branch === 'consequent') {
-							ifNode.consequent = blockStatement([branch]);
-						} else {
-							ifNode.alternate = blockStatement([branch]);
-						}
-
-						// Get the wrapped block and insert into it
-						const branchBlockPath = inlineInfo.ifPath!.get(
-							inlineInfo.branch!
-						) as NodePath<BlockStatement>;
-						const firstStmt = branchBlockPath.get('body')[0];
-						if (firstStmt) {
-							firstStmt.insertBefore(inlinedBody.body);
-							return;
-						}
-					}
-					statementPath.insertBefore(inlinedBody.body);
-				}
+				path.getStatementParent()?.insertBefore(inlinedBody.body);
 			}
 
 			// If there are no return statements, remove the function call after inlining

@@ -109,6 +109,27 @@ describe('Correctness tests', () => {
 		expect(functionBody).toMatch(correctPattern);
 	});
 
+	it('should inline calls that are the body of an unbraced if, else or loop in place', async () => {
+		const entryPoint = resolve(__dirname, 'fixtures/void-call-unbraced.js');
+		const result = await buildFilesEsbuild(entryPoint);
+		const transformedCode = result.outputFiles[0].text;
+
+		// The original calls must not survive next to their inlined bodies
+		expect(transformedCode).not.toMatch(/(?<!function )\bbump\s*\(/);
+		expect(transformedCode).not.toMatch(/(?<!function )\bscaled\s*\(/);
+
+		// Inlined code must run as often as the call did, inside its branch or loop
+		const { bumpIf, bumpElse, bumpLoop, sumScaled } = await import(
+			`data:text/javascript,${encodeURIComponent(transformedCode)}`
+		);
+		expect(bumpIf({ value: 0 }, true)).toBe(1);
+		expect(bumpIf({ value: 0 }, false)).toBe(0);
+		expect(bumpElse({ value: 0 }, false)).toBe(1);
+		expect(bumpElse({ value: 0 }, true)).toBe(-1);
+		expect(bumpLoop({ value: 0 }, 3)).toBe(3);
+		expect(sumScaled(3)).toBe(6);
+	});
+
 	it('should not rename substituted argument expressions when a local variable collides', async () => {
 		const entryPoint = resolve(__dirname, 'fixtures/nested-rename-collision/index.ts');
 		const result = await buildFilesEsbuild(entryPoint);
