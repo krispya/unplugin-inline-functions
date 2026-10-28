@@ -7,6 +7,7 @@ export interface ReadLocation {
 	object: Value;
 	key: string;
 }
+export type WriteLocation = ReadLocation | { binding: Binding };
 interface Evaluation {
 	value: Value;
 	pure: boolean;
@@ -15,6 +16,8 @@ interface Evaluation {
 interface RegionVisitor {
 	barrier?(): void;
 	read?(location: ReadLocation): void;
+	readBinding?(binding: Binding): void;
+	write?(path: NodePath<t.AssignmentExpression>, location: WriteLocation): void;
 	declaration?(path: NodePath<t.VariableDeclarator>, evaluation: Evaluation): void;
 }
 
@@ -60,6 +63,7 @@ class Region {
 		if (path.isIdentifier()) {
 			const binding = path.scope.getBinding(path.node.name);
 			const value = binding && this.bindings.get(binding);
+			if (binding && value) this.visitor.readBinding?.(binding);
 			// Includes unbound globals, live imports, TDZ reads, and unknown outer bindings.
 			return value ? { value, pure: true } : this.unknown();
 		}
@@ -114,6 +118,33 @@ class Region {
 		// other than plain objects, await/yield, and unknown syntax end the region.
 		return this.unknown();
 	}
+
+	/** Only standalone simple stores to initialized locals or known writable data slots. */
+	assign(path: NodePath<t.AssignmentExpression>) {
+		if (path.node.operator !== '=') return this.clear();
+		const left = path.get('left');
+		if (left.isIdentifier()) {
+			const binding = left.scope.getBinding(left.node.name);
+			if (!binding || !['let', 'var'].includes(binding.kind) || !this.bindings.has(binding))
+				return this.clear();
+			const result = this.evaluate(path.get('right'));
+			if (!result.pure || !this.bindings.has(binding)) return this.clear();
+			this.visitor.write?.(path, { binding });
+			this.bindings.set(binding, result.value);
+		} else if (left.isMemberExpression()) {
+			const object = this.evaluate(left.get('object'));
+			const key = propertyKey(left.node.property, left.node.computed);
+			const properties = this.objects.get(object.value);
+			if (!object.pure || key === undefined || !properties?.has(key)) return this.clear();
+			const result = this.evaluate(path.get('right'));
+			// Unknown RHS effects could replace the descriptor or expose the old value.
+			if (!result.pure || this.objects.get(object.value) !== properties) return this.clear();
+			this.visitor.write?.(path, { object: object.value, key });
+			const updated = new Map(properties);
+			updated.set(key, result.value);
+			this.objects.set(object.value, updated);
+		} else this.clear();
+	}
 }
 
 /** Analyze each statement list separately; never hoist across a control-flow boundary. */
@@ -149,7 +180,10 @@ export function visitSafeRegions(
 				visitList((statement.get('body') as NodePath<t.BlockStatement>).get('body'), region);
 				region.clear();
 			} else if (statement.isExpressionStatement()) {
-				region.evaluate(statement.get('expression'));
+				const expression = statement.get('expression');
+				if (region.visitor.write && expression.isAssignmentExpression())
+					region.assign(expression);
+				else region.evaluate(expression);
 			} else if (!statement.isEmptyStatement() && !statement.isFunctionDeclaration()) {
 				region.clear();
 				// Branch, loop, catch, and finally bodies start without inherited facts.

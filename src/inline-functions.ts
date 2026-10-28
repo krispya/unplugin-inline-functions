@@ -4,6 +4,7 @@ import _traverse, { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import { resolveBinding } from './collect-metadata';
 import { dedupVariables } from './dedup-variables';
+import { eliminateWrites } from './eliminate-writes';
 import { STATS } from './stats';
 import { getBabelDefaultExport } from './utils/babel-exports';
 import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
@@ -221,5 +222,6 @@ export function inlineFunctions(ast: ParseResult<t.File>) {
 		},
 	});
 	dedupVariables(transformed.keys());
+	eliminateWrites(transformed.keys());
 	return generate(ast).code;
 }
