@@ -18,8 +18,14 @@ describe('module resolution', () => {
 		fs.mkdirSync(libSrcDir, { recursive: true });
 		fs.mkdirSync(nodeModulesDir, { recursive: true });
 
-		fs.writeFileSync(path.join(tempProjectDir, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
-		fs.writeFileSync(path.join(tempProjectDir, 'package.json'), JSON.stringify({ private: true }));
+		fs.writeFileSync(
+			path.join(tempProjectDir, 'pnpm-workspace.yaml'),
+			'packages:\n  - packages/*\n'
+		);
+		fs.writeFileSync(
+			path.join(tempProjectDir, 'package.json'),
+			JSON.stringify({ private: true })
+		);
 		fs.writeFileSync(
 			path.join(appDir, 'package.json'),
 			JSON.stringify({ name: 'app', private: true, type: 'module' })
@@ -103,7 +109,10 @@ export function calculate(value: number) {
 		const srcDir = path.join(tempProjectDir, 'src');
 
 		fs.mkdirSync(srcDir, { recursive: true });
-		fs.writeFileSync(path.join(tempProjectDir, 'package.json'), JSON.stringify({ private: true }));
+		fs.writeFileSync(
+			path.join(tempProjectDir, 'package.json'),
+			JSON.stringify({ private: true })
+		);
 		fs.writeFileSync(path.join(srcDir, 'symbols.ts'), `export const marker = Symbol('marker');`);
 		fs.writeFileSync(
 			path.join(srcDir, 'utils.ts'),
@@ -133,7 +142,7 @@ export function check(value: { marker: symbol }) {
 						name: 'alias-test-resolver',
 						setup(build) {
 							build.onResolve({ filter: /^@\// }, (args) => ({
-								path: path.join(srcDir, args.path.slice(2)),
+								path: path.join(srcDir, args.path.slice(2) + '.ts'),
 							}));
 						},
 					},

@@ -22,6 +22,16 @@ export function resolveExportPath(sourcePath: string, fromDir: string): string |
 			return fs.realpathSync(indexPath);
 		}
 	}
+	// TypeScript sources commonly import their eventual JavaScript filenames.
+	const sourceExtension = /\.jsx?$/.exec(resolved);
+	if (sourceExtension) {
+		const typescriptPath =
+			resolved.slice(0, -sourceExtension[0].length) +
+			(sourceExtension[0] === '.jsx' ? '.tsx' : '.ts');
+		if (fs.existsSync(typescriptPath) && fs.statSync(typescriptPath).isFile()) {
+			return fs.realpathSync(typescriptPath);
+		}
+	}
 
 	return null;
 }

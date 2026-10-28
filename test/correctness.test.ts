@@ -17,6 +17,10 @@ describe('Correctness tests', () => {
 		// The inlined function body should appear instead
 		expect(transformedCode).toContain('const sum =');
 		expect(transformedCode).toContain('const product =');
+		const { testFunction } = await import(
+			`data:text/javascript,${encodeURIComponent(transformedCode)}`
+		);
+		expect(testFunction()).toBe(30);
 	});
 
 	it('should preserve statements after if statements when inlining', async () => {
@@ -27,20 +31,10 @@ describe('Correctness tests', () => {
 		// Verify the function call was inlined
 		expect(transformedCode).not.toMatch(/setArrayValue\s*\(array,\s*5,\s*testValue\)/);
 
-		// Extract the testSetArrayValue function body
-		const functionMatch = transformedCode.match(
-			/function testSetArrayValue\(\)\s*\{([\s\S]*?)\n\}/
+		const { testSetArrayValue } = await import(
+			`data:text/javascript,${encodeURIComponent(transformedCode)}`
 		);
-		expect(functionMatch).toBeTruthy();
-		const functionBody = functionMatch![1];
-
-		// Verify the assignment exists
-		expect(functionBody).toMatch(/array\[[\s\S]*?\]\s*=\s*testValue/);
-
-		// Verify the assignment is NOT in an else block
-		// Should NOT match: } else { ... array[...] = testValue ... }
-		const assignmentInElsePattern = /\}\s*else\s*\{[\s\S]*?array\[[\s\S]*?\]\s*=\s*testValue/;
-		expect(functionBody).not.toMatch(assignmentInElsePattern);
+		expect(testSetArrayValue()).toBe(true);
 	});
 
 	it('should preserve early exit semantics when inlining functions with early returns', async () => {
@@ -51,18 +45,10 @@ describe('Correctness tests', () => {
 		// Verify the function call was inlined
 		expect(transformedCode).not.toMatch(/processIfPositive\s*\(-5,\s*output\)/);
 
-		// Extract the testEarlyExit function body
-		const functionMatch = transformedCode.match(/function testEarlyExit\(\)\s*\{([\s\S]*?)\n\}/);
-		expect(functionMatch).toBeTruthy();
-		const functionBody = functionMatch![1];
-
-		// Verify the processing code exists
-		expect(functionBody).toMatch(/output\.value\s*=\s*[\d-]+\s*\*\s*2/);
-
-		// Verify the processing code IS in an else block (to preserve early exit)
-		// Should match: } else { ... output.value = ... ... }
-		const processingInElsePattern = /\}\s*else\s*\{[\s\S]*?output\.value\s*=\s*[\d-]+\s*\*\s*2/;
-		expect(functionBody).toMatch(processingInElsePattern);
+		const { testEarlyExit } = await import(
+			`data:text/javascript,${encodeURIComponent(transformedCode)}`
+		);
+		expect(testEarlyExit()).toBe(true);
 	});
 
 	it('should preserve control flow when inlining multiple functions in conditional branches', async () => {
@@ -139,14 +125,8 @@ describe('Correctness tests', () => {
 		expect(transformedCode).not.toMatch(/\bprocess\s*\(/);
 		expect(transformedCode).not.toMatch(/\bresolve\s*\(/);
 
-		// The generated code must not have a self-referential const (TDZ violation).
-		// A broken rename produces: const ctx_N_$f = 'value' in ctx_N_$f ? ctx_N_$f : ...
-		// The RHS of the const initializer must reference the caller's `ctx`, not the renamed local.
-		const selfRefPattern = /const\s+(\w+)\s*=\s*['"]value['"]\s+in\s+\1/;
-		expect(transformedCode).not.toMatch(selfRefPattern);
-
-		// The ternary condition should reference the original caller parameter `ctx`,
-		// not a renamed local like `ctx_N_$f`.
-		expect(transformedCode).toMatch(/"value"\s+in\s+ctx[\s?]/);
+		const { run } = await import(`data:text/javascript,${encodeURIComponent(transformedCode)}`);
+		expect(run({ value: 42 }, 'value')).toBe(42);
+		expect(run({ wrapped: { value: 7 } }, 'value')).toBe(7);
 	});
 });
