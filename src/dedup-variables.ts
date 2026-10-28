@@ -1,106 +1,33 @@
-import _generate from '@babel/generator';
-import _traverse, { NodePath } from '@babel/traverse';
-import { cloneNode, Function, isIdentifier, Node } from '@babel/types';
-import { getBabelDefaultExport } from './utils/babel-exports';
+import { Binding, NodePath } from '@babel/traverse';
+import * as t from '@babel/types';
+import { ReadLocation, visitSafeRegions } from './utils/safe-regions';
 
-const generate = getBabelDefaultExport(_generate);
-const traverse = getBabelDefaultExport(_traverse);
-
-export function dedupVariables(transformedFunctions: Map<NodePath<Function>, { isPure: boolean }>) {
-	for (let [functionPath, { isPure }] of transformedFunctions) {
-		if (!isPure) continue;
-
-		const expressionCounts = new Map<string, number>();
-		const variableDeclarations = new Map<string, string>();
-		const firstDeclarationForExpression = new Map<
-			string,
-			{ name: string; isInIfStatement: boolean }
-		>();
-		const variablesToReplace = new Map<string, string>();
-
-		// Remove duplicate memory access expressions if it is safe to do so.
-		traverse(
-			functionPath.node,
-			{
-				VariableDeclarator(path) {
-					// Handle variable declarations
-					if (!isIdentifier(path.node.id)) return;
-					const variableName = path.node.id.name;
-					if (!variableName.endsWith('_$f')) return;
-
-					// Only dedup const declarations
-					if (path.parent.type !== 'VariableDeclaration' || path.parent.kind !== 'const') {
-						return;
-					}
-
-					const init = path.node.init;
-					if (!init) return;
-
-					let clonedInit = cloneNode(init);
-
-					// Remove nullish type annotations.
-					if (clonedInit.type === 'TSNonNullExpression') {
-						clonedInit = clonedInit.expression;
-					}
-
-					let code = generate(clonedInit).code;
-
-					// Replace any known variable references.
-					for (const [varName, replacement] of variableDeclarations.entries()) {
-						code = code.replace(`${varName}.`, replacement);
-					}
-
-					variableDeclarations.set(variableName, code);
-					let expressionCount = expressionCounts.get(code) || 0;
-					expressionCount++;
-					expressionCounts.set(code, expressionCount);
-
-					// Check if current declaration is inside an if statement
-					let parent: NodePath<Node> | null = path.parentPath;
-					let isInIfStatement = false;
-					while (parent) {
-						if (parent.isIfStatement()) {
-							isInIfStatement = true;
-							break;
-						}
-						parent = parent.parentPath;
-					}
-
-					if (expressionCount > 1) {
-						const firstDeclaration = firstDeclarationForExpression.get(code)!;
-
-						// Only deduplicate if both declarations are in the same scope
-						if (isInIfStatement === firstDeclaration.isInIfStatement) {
-							// Only deduplicate if both are outside if statements
-							if (!isInIfStatement) {
-								variablesToReplace.set(variableName, firstDeclaration.name);
-								// Remove the declaration from the ast.
-								path.remove();
-							}
-						}
-					} else {
-						firstDeclarationForExpression.set(code, {
-							name: variableName,
-							isInIfStatement,
-						});
-					}
-				},
+/** Reuse a const snapshot only within one proven-safe straight-line region. */
+export function dedupVariables(functions: Iterable<NodePath<t.Function>>) {
+	visitSafeRegions(functions, () => {
+		const reads = new Map<ReadLocation['object'], Map<string, Binding>>();
+		return {
+			barrier() {
+				reads.clear();
 			},
-			functionPath.scope
-		);
-
-		// Replace variables with their first declaration.
-		traverse(
-			functionPath.node,
-			{
-				Identifier(path) {
-					const name = path.node.name;
-					if (variablesToReplace.has(name)) {
-						path.node.name = variablesToReplace.get(name)!;
-					}
-				},
+			declaration(path, evaluation) {
+				if (
+					!evaluation.pure ||
+					!evaluation.read ||
+					!path.parentPath.isVariableDeclaration({ kind: 'const' })
+				)
+					return;
+				const { object, key } = evaluation.read;
+				const binding = path.scope.getBinding((path.node.id as t.Identifier).name)!;
+				const previous = reads.get(object)?.get(key);
+				// A same-spelled binding in a nested scope is a different value.
+				if (previous && path.scope.getBinding(previous.identifier.name) === previous) {
+					path.get('init').replaceWith(t.identifier(previous.identifier.name));
+				} else {
+					if (!reads.has(object)) reads.set(object, new Map());
+					reads.get(object)!.set(key, binding);
+				}
 			},
-			functionPath.scope
-		);
-	}
+		};
+	});
 }
