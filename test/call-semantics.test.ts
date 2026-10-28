@@ -481,3 +481,180 @@ it('does not rebind a dependency to a different installed package version', asyn
 		'main.js': "import {read} from './lib/api.js'; export function run() { return read(1); }",
 	});
 });
+
+it('keeps nested return labels unique when injected imports rebuild scopes', async () => {
+	await compareBuilds(
+		{
+			'dep.js': 'export const step = 1;',
+			'lib.js':
+				"import {step} from './dep.js'; export /* @inline */ function inner(x) { if (x < 0) return 0; return x + step; } export /* @inline */ function outer(x) { const first = inner(x); return inner(first); }",
+			'main.js':
+				"import {outer} from './lib.js'; export function run() { return [outer(1), outer(-2)]; }",
+		},
+		'outer'
+	);
+});
+
+it('avoids source labels on ancestor blocks when generating return labels', async () => {
+	await compareBuilds(
+		{
+			'main.js':
+				'/* @inline */ function choose(value) { if (value) return 1; return 2; } export function run() { _inline: { return choose(true); } }',
+		},
+		'choose'
+	);
+});
+
+it('substitutes parameters after removing nested TypeScript assertions', async () => {
+	await compareBuilds(
+		{
+			'lib.ts':
+				'export /* @inline */ function isValue(value: unknown): value is {x: boolean} { return (value as {x?: boolean} | null)?.x as unknown as boolean; }',
+			'main.js':
+				"import {isValue} from './lib.ts'; export function run() { const first = {x: true}; const second = null; return [isValue(first), isValue(second)]; }",
+		},
+		'isValue'
+	);
+});
+
+it('reserves invocation temporaries while registering dependency imports', async () => {
+	await compareBuilds(
+		{
+			'dep.js': 'export const step = 2;',
+			'lib.js':
+				"import {step} from './dep.js'; export /* @inline */ function calculate(arg) { const result = arg + step; return result; }",
+			'main.js':
+				"import {calculate} from './lib.js'; export function run() { return calculate(3); }",
+		},
+		'calculate'
+	);
+});
+
+it('uses an expression instead of an invocation frame for tiny arrow helpers', async () => {
+	const result = await compareBuilds({
+		'lib.ts': 'export const getEntityId = /* @inline */ (entity: number) => entity & 0xffffff;',
+		'main.js':
+			"import {getEntityId} from './lib.ts'; export function run() { const entity = 0x1000003; return getEntityId(entity); }",
+	});
+	const caller = result.code.slice(result.code.indexOf('function run('));
+	expect(caller).toContain('& 16777215');
+	expect(caller).not.toContain('_inline');
+	expect(caller).not.toContain('_result');
+});
+
+it.each(['var', 'let', 'const'])(
+	'preserves native failure before a %s arrow is initialized',
+	async (kind) => {
+		await compareBuilds({
+			'main.js': `export function run() { const value = 3; try { return helper(value); } catch (error) { return error.name; } ${kind} helper = /* @inline */ (value) => value + 1; }`,
+		});
+	}
+);
+
+it.each([
+	[
+		'one evaluation',
+		'function read(value) { return value & 255; }',
+		'let count = 1; const result = read(++count); return [result, count];',
+	],
+	[
+		'unbound method receiver',
+		'function read(value) { return value(); }',
+		'const object = {method() { return this === undefined; }}; return read(object.method);',
+	],
+	[
+		'anonymous function names',
+		'function read(value) { return value.name; }',
+		'return read(() => 1);',
+	],
+	[
+		'indirect eval',
+		'function read(value) { return value("typeof local"); }',
+		'const local = 1; return read(eval);',
+	],
+	[
+		'free bindings after argument effects',
+		'function read(value) { return value + offset; }',
+		'return read((offset = 5, 2));',
+	],
+	[
+		'optional access',
+		'function read(value) { return value?.x; }',
+		'let count = 0; const result = read((++count, null)); return [result, count];',
+	],
+	[
+		'typeof still evaluates the input',
+		'function read(value) { return typeof value; }',
+		'try { return read(missing); } catch (error) { return error.name; }',
+	],
+])('inlines a leading single-use input while preserving %s', async (_name, declaration, caller) => {
+	const result = await compareBuilds(
+		{
+			'main.js': `let offset = 1; /* @inline */ ${declaration} export function run() { ${caller} }`,
+		},
+		'read'
+	);
+	expect(result.code.slice(result.code.indexOf('function run('))).not.toContain('_inline');
+});
+
+it('keeps argument capture when the parameter is evaluated after other operations', async () => {
+	const result = await compareBuilds(
+		{
+			'main.js':
+				'const log = []; function before() { log.push("body"); return 1; } /* @inline */ function read(value) { return before() + value; } export function run() { const value = read((log.push("arg"), 2)); return [value, log]; }',
+		},
+		'read'
+	);
+	expect(result.code).toContain('_inline');
+});
+
+it('substitutes a leading data read when the remaining inputs are stable', async () => {
+	const result = await compareBuilds(
+		{
+			'lib.ts':
+				'export /* @inline */ function getInstance(data: Record<string, number>, trait: {id: string}) { return data[trait.id]; }',
+			'main.js':
+				"import {getInstance} from './lib.ts'; export function run() { let count = 0; const trait = {id: 'value'}; const context = {get data() { count++; return {value: 3}; }}; const value = getInstance(context.data, trait); return [value, count]; }",
+		},
+		'getInstance'
+	);
+	expect(result.code.slice(result.code.indexOf('function run('))).not.toContain('_inline');
+});
+
+it('captures all arguments before body getters when a later input has effects', async () => {
+	await compareBuilds(
+		{
+			'main.js':
+				'const log = []; /* @inline */ function read(data, key) { return data[key.id]; } export function run() { const data = {get x() { log.push("body"); return 3; }}; const value = read((log.push("first"), data), (log.push("second"), {id: "x"})); return [value, log]; }',
+		},
+		'read'
+	);
+});
+
+it('reuses initialized immutable parameter snapshots at nested inline sites', async () => {
+	const result = await compareBuilds(
+		{
+			'lib.js':
+				'export /* @inline */ function getInstance(data, trait) { return data[trait.id]; } export /* @inline */ function outer(context, trait) { const value = getInstance(context.data, trait); return value + 1; }',
+			'main.js':
+				"import {outer} from './lib.js'; export function run() { const context = {data: {x: 3}}; const trait = {id: 'x'}; return outer(context, trait); }",
+		},
+		'outer'
+	);
+	expect(result.code.match(/\blet _result\d*;/g)).toHaveLength(1);
+});
+
+it('resolves injected dependency imports relative to the caller module', async () => {
+	await compareBuilds(
+		{
+			'shared/leaf.js': 'export /* @inline */ function leaf(value) { return value + 1; }',
+			'nested/lib/shared/leaf.js':
+				'export /* @inline */ function leaf(value) { return value + 100; }',
+			'nested/lib/outer.js':
+				"import {leaf} from '../../shared/leaf.js'; export /* @inline */ function outer(value) { const result = leaf(value); return result; }",
+			'main.js':
+				"import {outer} from './nested/lib/outer.js'; export function run() { return outer(2); }",
+		},
+		'outer'
+	);
+});

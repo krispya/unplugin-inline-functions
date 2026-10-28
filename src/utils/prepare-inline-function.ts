@@ -201,7 +201,11 @@ function dependencyPlan(call: NodePath<t.CallExpression>, fn: InlinableFunction)
 }
 
 /** Clone a complete function scope so Babel can rename bindings, including destructured locals. */
-export function prepareInlineFunction(call: NodePath<t.CallExpression>, fn: InlinableFunction) {
+export function prepareInlineFunction(
+	call: NodePath<t.CallExpression>,
+	fn: InlinableFunction,
+	newLabel: (name: string) => t.Identifier
+) {
 	if (call.node.arguments.some((argument) => !t.isExpression(argument))) return;
 	// These expressions belong to the caller's async/generator context, which a wrapper cannot move.
 	let suspended = false;
@@ -267,7 +271,7 @@ export function prepareInlineFunction(call: NodePath<t.CallExpression>, fn: Inli
 		},
 		LabeledStatement(path) {
 			const oldName = path.node.label.name;
-			const label = call.scope.generateUidIdentifier(oldName);
+			const label = newLabel(oldName);
 			path.node.label = label;
 			path.get('body').traverse({
 				Function(path) {
@@ -280,11 +284,18 @@ export function prepareInlineFunction(call: NodePath<t.CallExpression>, fn: Inli
 			});
 		},
 	});
+	// Unwrapping TypeScript nodes can detach the reference paths collected during
+	// renaming. Substitution must use references in the final runtime tree.
+	functionPath.scope.crawl();
 	return { functionPath, imports: dependencies.imports };
 }
 
 /** A value-stable argument can be substituted without repeating effects or changing a snapshot. */
-export function stableArgument(node: t.Expression, call: NodePath<t.CallExpression>): boolean {
+export function stableArgument(
+	node: t.Expression,
+	call: NodePath<t.CallExpression>,
+	initializedSnapshots?: WeakSet<t.Identifier>
+): boolean {
 	if (
 		t.isNumericLiteral(node) ||
 		t.isStringLiteral(node) ||
@@ -300,6 +311,9 @@ export function stableArgument(node: t.Expression, call: NodePath<t.CallExpressi
 		return false;
 	// A call inside a parameter initializer can precede initialization of later parameters.
 	if (!call.findParent((path) => path === owner.get('body'))) return false;
+	// Invocation snapshots are initialized before entering their cloned body,
+	// including nested inline sites whose generated declarations have no source loc.
+	if (initializedSnapshots?.has(binding.identifier)) return true;
 	if (binding.kind === 'param') return true;
 	return (
 		binding.kind === 'const' &&
@@ -311,6 +325,25 @@ export function stableArgument(node: t.Expression, call: NodePath<t.CallExpressi
 					binding.path.node.loc.end.column < call.node.loc.start.column))
 		)
 	);
+}
+
+/** A single-use parameter can consume an effectful input at the start of the return expression. */
+export function leadingSingleUse(expression: t.Node | null | undefined, binding: Binding): boolean {
+	if (binding.referencePaths.length !== 1) return false;
+	const reference = binding.referencePaths[0].node;
+	let first = expression;
+	while (first) {
+		if (first === reference) return true;
+		if (t.isSequenceExpression(first)) first = first.expressions[0];
+		else if (t.isUnaryExpression(first)) first = first.argument;
+		else if (t.isMemberExpression(first) || t.isOptionalMemberExpression(first))
+			first = first.object;
+		else if (t.isBinaryExpression(first) || t.isLogicalExpression(first)) first = first.left;
+		else if (t.isConditionalExpression(first)) first = first.test;
+		else if (t.isCallExpression(first) || t.isOptionalCallExpression(first)) first = first.callee;
+		else return false;
+	}
+	return false;
 }
 
 /** Turn function-scoped vars into per-invocation block bindings, retaining var hoisting. */
