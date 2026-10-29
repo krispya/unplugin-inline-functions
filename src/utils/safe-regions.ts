@@ -1,9 +1,8 @@
-import { Binding, NodePath, Scope } from '@babel/traverse';
+import { Binding, NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
-import { bindingKey } from '../collect-metadata';
 
 // Tokens represent runtime value identity, never generated source text or variable names.
-type Value = object;
+type Value = { propertyKey?: string };
 export interface ReadLocation {
 	object: Value;
 	key: string;
@@ -20,17 +19,6 @@ interface RegionVisitor {
 	readBinding?(binding: Binding): void;
 	write?(path: NodePath<t.AssignmentExpression>, location: WriteLocation): void;
 	declaration?(path: NodePath<t.VariableDeclarator>, evaluation: Evaluation): void;
-}
-
-/** A property name, or a token for a constant binding used as a computed key such as a symbol. */
-function propertyKey(node: t.Node, computed: boolean, scope: Scope): string | undefined {
-	if (!computed && t.isIdentifier(node)) return node.name;
-	if (t.isStringLiteral(node) || t.isNumericLiteral(node)) return String(node.value);
-	if (!computed || !t.isIdentifier(node)) return undefined;
-	const binding = scope.getBinding(node.name);
-	if (!binding?.constant || !['const', 'module'].includes(binding.kind)) return undefined;
-	const key = bindingKey(binding.identifier);
-	return key && `\0${key}`;
 }
 
 /** Facts expire at any operation that might observe or mutate memory, throw, or suspend. */
@@ -55,16 +43,18 @@ class Region {
 		this.clear();
 		return { value: {}, pure: false };
 	}
+	propertyKey(path: NodePath<t.Node>, computed: boolean): string | undefined {
+		if (!computed && path.isIdentifier()) return path.node.name;
+		// A constant binding may still contain an object with observable key coercion.
+		// Reuse only initialized primitive snapshots, normalized to the actual slot name.
+		const result = this.evaluate(path);
+		return result.pure ? result.value.propertyKey : undefined;
+	}
 	evaluate(path: NodePath<t.Node>): Evaluation {
-		if (
-			path.isNumericLiteral() ||
-			path.isStringLiteral() ||
-			path.isBooleanLiteral() ||
-			path.isNullLiteral() ||
-			path.isBigIntLiteral() ||
-			path.isFunctionExpression() ||
-			path.isArrowFunctionExpression()
-		)
+		if (path.isNumericLiteral() || path.isStringLiteral() || path.isBooleanLiteral())
+			return { value: { propertyKey: String(path.node.value) }, pure: true };
+		if (path.isNullLiteral()) return { value: { propertyKey: 'null' }, pure: true };
+		if (path.isBigIntLiteral() || path.isFunctionExpression() || path.isArrowFunctionExpression())
 			return { value: {}, pure: true };
 		if (path.isIdentifier()) {
 			const binding = path.scope.getBinding(path.node.name);
@@ -92,7 +82,10 @@ class Region {
 		}
 		if (path.isUnaryExpression() && ['void', '!', 'typeof'].includes(path.node.operator)) {
 			const result = this.evaluate(path.get('argument'));
-			return { value: {}, pure: result.pure };
+			return {
+				value: path.node.operator === 'void' ? { propertyKey: 'undefined' } : {},
+				pure: result.pure,
+			};
 		}
 		if (path.isObjectExpression()) {
 			const properties = new Map<string, Value>();
@@ -100,7 +93,7 @@ class Region {
 			for (const property of path.get('properties')) {
 				// Reject accessors, spreads, methods, dynamic keys, and prototype setters.
 				if (!property.isObjectProperty()) return this.unknown();
-				const key = propertyKey(property.node.key, property.node.computed, property.scope);
+				const key = this.propertyKey(property.get('key'), property.node.computed);
 				if (key === undefined || key === '__proto__') return this.unknown();
 				const result = this.evaluate(property.get('value'));
 				pure &&= result.pure;
@@ -113,7 +106,7 @@ class Region {
 		}
 		if (path.isMemberExpression()) {
 			const object = this.evaluate(path.get('object'));
-			const key = propertyKey(path.node.property, path.node.computed, path.scope);
+			const key = this.propertyKey(path.get('property'), path.node.computed);
 			const properties = this.objects.get(object.value);
 			if (key === undefined || !properties?.has(key)) return this.unknown();
 			const read = { object: object.value, key };
@@ -139,7 +132,7 @@ class Region {
 			this.bindings.set(binding, result.value);
 		} else if (left.isMemberExpression()) {
 			const object = this.evaluate(left.get('object'));
-			const key = propertyKey(left.node.property, left.node.computed, left.scope);
+			const key = this.propertyKey(left.get('property'), left.node.computed);
 			const properties = this.objects.get(object.value);
 			if (!object.pure || key === undefined || !properties?.has(key)) return this.clear();
 			const result = this.evaluate(path.get('right'));

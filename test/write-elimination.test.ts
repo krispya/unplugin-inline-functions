@@ -34,7 +34,7 @@ async function execute(source: string) {
 const safe = [
 	[
 		'overwritten constant computed slots',
-		'const key = Symbol("k"); const object = {[key]: 0}; object[key] = 1; object[key] = 2; return object[key];',
+		'const key = "x"; const object = {[key]: 0}; object[key] = 1; object[key] = 2; return object[key];',
 		'object[key] = 1;',
 	],
 	[
@@ -133,6 +133,22 @@ describe('safe write elimination', () => {
 });
 
 const unsafe = [
+	[
+		'computed stores retain every key coercion',
+		'let count = 0; const key = {toString() { count++; return "x"; }}; const object = {[key]: 0}; object[key] = 1; object[key] = 2; return [count, object.x];',
+	],
+	[
+		'computed initializers retain key TDZ errors',
+		'try { let object = {[key]: 1}; object = {}; const key = "x"; return "missing error"; } catch (error) { return error.name; }',
+	],
+	[
+		'computed primitive keys alias literal properties',
+		'const key = "x"; const object = {[key]: 0, x: 0}; object[key] = 1; const first = object.x; object[key] = 2; return [first, object.x];',
+	],
+	[
+		'computed symbol aliases observe the same slot',
+		'const key = Symbol("x"); const alias = key; const object = {[key]: 0, [alias]: 0}; object[key] = 1; const first = object[alias]; object[key] = 2; return [first, object[key]];',
+	],
 	['the final store is observable', 'const object = {x: 0}; object.x = 1; return object.x;'],
 	[
 		'a replaced child is a different object',

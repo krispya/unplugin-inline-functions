@@ -63,8 +63,16 @@ const safe = [
 		'const object = {x: 1, y: 2}; const first = object.x; const other = object.y; const second = object.x; return [first, other, second];',
 	],
 	[
-		'constant computed keys such as symbols',
-		'const key = Symbol("k"); const object = {[key]: 1}; const first = object[key]; const second = object[key]; return [first, second];',
+		'initialized primitive computed keys',
+		'const key = "x"; const object = {[key]: 1}; const first = object[key]; const second = object[key]; return [first, second];',
+	],
+	[
+		'computed primitive aliases share one slot',
+		'const key = "x"; const alias = key; const object = {[key]: 1}; const first = object[alias]; const second = object.x; return [first, second];',
+	],
+	[
+		'computed numbers alias string property names',
+		'const key = 1; const object = {[key]: 2}; const first = object["1"]; const second = object[key]; return [first, second];',
 	],
 ];
 
@@ -113,6 +121,14 @@ describe('safe read deduplication', () => {
 });
 
 const unsafe = [
+	[
+		'computed keys without primitive proof',
+		'const key = Symbol("k"); const object = {[key]: 1}; const first = object[key]; const second = object[key]; return [first, second];',
+	],
+	[
+		'computed object keys retain every coercion',
+		'let count = 0; const key = {toString() { count++; return "x"; }}; const object = {[key]: 1}; const first = object[key]; const second = object[key]; return [count, first, second];',
+	],
 	[
 		'reassigned computed keys',
 		'let key = "x"; const object = {x: 1, y: 2}; const first = object[key]; key = "y"; const second = object[key]; return [first, second];',
