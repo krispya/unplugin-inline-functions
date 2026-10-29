@@ -344,7 +344,7 @@ Measurement adds roughly a hundred milliseconds per transformed module the first
 
 ## Cold branches
 
-A branch that only throws, such as an assertion failure with a formatted message, costs bytecode on the hot path without ever running on it. The plugin moves such branches out of transformed functions into module-level functions that take the values the branch reads as parameters. Mark any `if` statement or branch with `/* @cold */` to move it the same way, provided it does not write surrounding locals, use `this`, `arguments`, `await` or `yield`, or break out of an enclosing loop. A cold branch that returns becomes `return cold(...)`.
+A branch that only throws, such as an assertion failure with a formatted message, costs bytecode on the hot path without ever running on it. The plugin moves such branches out of transformed functions into module-level functions that take the values the branch reads as parameters. Mark any `if` statement or branch with `/* @cold */` to move it the same way, provided it does not write surrounding locals, use `this`, `arguments`, `await` or `yield`, or break out of an enclosing loop. A cold branch that returns becomes `return cold(...)`. The budget keeps each function under the per-callee limit, but V8 also charges a callee's whole size, cold branches included, against a cumulative limit per optimized caller. An inlined call inside a rarely taken branch of a hot function therefore costs the callers that inline it without ever running. Mark such branches `@cold` so the hot path stays small.
 
 ```ts
 export function set(ctx, entity, trait, value) {
