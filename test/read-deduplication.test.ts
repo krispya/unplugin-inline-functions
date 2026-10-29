@@ -62,6 +62,10 @@ const safe = [
 		'distinct keys remain independent',
 		'const object = {x: 1, y: 2}; const first = object.x; const other = object.y; const second = object.x; return [first, other, second];',
 	],
+	[
+		'constant computed keys such as symbols',
+		'const key = Symbol("k"); const object = {[key]: 1}; const first = object[key]; const second = object[key]; return [first, second];',
+	],
 ];
 
 describe('safe read deduplication', () => {
@@ -109,6 +113,14 @@ describe('safe read deduplication', () => {
 });
 
 const unsafe = [
+	[
+		'reassigned computed keys',
+		'let key = "x"; const object = {x: 1, y: 2}; const first = object[key]; key = "y"; const second = object[key]; return [first, second];',
+	],
+	[
+		'distinct constant computed keys',
+		'const a = Symbol("a"); const b = Symbol("b"); const object = {[a]: 1, [b]: 2}; const first = object[a]; const second = object[b]; return [first, second];',
+	],
 	[
 		'getters',
 		'let count = 0; const object = {get x() { return ++count; }}; const first = object.x; const second = object.x; return [first, second];',

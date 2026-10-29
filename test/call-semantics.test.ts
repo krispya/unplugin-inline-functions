@@ -289,6 +289,51 @@ const cases = [
 		source: '/* @inline */ function identity(x) { return x; } async function run() { return identity(await Promise.resolve(2)); }\nexport {run};',
 		inlined: null,
 	},
+	{
+		name: 'ordered effectful inputs substitute into a leading member chain',
+		source: "/* @inline */ function read(data, key) { return data[key.id]; } function run() { const log = []; const value = read((log.push('data'), {x: 3}), (log.push('key'), {id: 'x'})); return [value, log]; }\nexport {run};",
+		inlined: 'read',
+	},
+	{
+		name: 'effectful inputs after a body effect keep their order',
+		source: "const log = []; /* @inline */ function read(data, key) { log.push('body'); return data[key.id]; } function run() { const value = read((log.push('data'), {x: 3}), (log.push('key'), {id: 'x'})); return [value, log]; }\nexport {run};",
+		inlined: 'read',
+	},
+	{
+		name: 'early returns inside loops at a declaration site',
+		source: '/* @inline */ function find(items, limit) { for (const item of items) { if (item > limit) return item; } return -1; } function run() { const first = find([1, 5, 9], 4); const none = find([1], 4); return [first, none]; }\nexport {run};',
+		inlined: 'find',
+	},
+	{
+		name: 'multi-exit bodies in a condition',
+		source: '/* @inline */ function classify(value) { if (value < 0) return "negative"; if (value === 0) return "zero"; return "positive"; } function run() { const out = []; for (const value of [-1, 0, 1]) { if (classify(value) === "zero") out.push("z"); else out.push(classify(value)); } return out; }\nexport {run};',
+		inlined: 'classify',
+	},
+	{
+		name: 'loop bodies in a conditional operand',
+		source: '/* @inline */ function any(items) { for (const item of items) if (item) return true; return false; } function run() { const log = []; const a = log.push(1) && any([0, 1]); const b = false || any([0]); return [a, b, log]; }\nexport {run};',
+		inlined: 'any',
+	},
+	{
+		name: 'exported and loop head declarations',
+		source: '/* @inline */ function twice(x) { const value = x * 2; if (value > 100) return 100; return value; } export const limit = twice(60); function run() { const out = []; for (let i = twice(1), n = 0; n < 2; n++) out.push(i + n); return [limit, out]; }\nexport {run};',
+		inlined: 'twice',
+	},
+	{
+		name: 'concise arrows expanding a call',
+		source: '/* @inline */ function clamp(x) { if (x > 1) return 1; return x; } function run() { return [0.5, 2].map(x => clamp(x) * 10); }\nexport {run};',
+		inlined: 'clamp',
+	},
+	{
+		name: 'spliced bodies at a for-of head run once',
+		source: '/* @inline */ function items(log) { log.push("items"); const list = [1, 2]; return list; } function run() { const log = []; for (const item of items(log)) log.push(item); return log; }\nexport {run};',
+		inlined: 'items',
+	},
+	{
+		name: 'if-test splices keep their consequent block',
+		source: '/* @inline */ function ready(state) { const count = state.count; return count > 0; } function run() { const state = {count: 1}; let hits = 0; if (ready(state)) hits++; else hits--; for (let i = 0; i < 2; i++) if (ready(state)) hits++; return hits; }\nexport {run};',
+		inlined: 'ready',
+	},
 ];
 
 describe('call semantics', () => {
@@ -305,6 +350,34 @@ describe('call semantics', () => {
 			'twice'
 		);
 		expect(result.code.slice(result.code.indexOf('function run('))).not.toContain('=>');
+	});
+
+	it('splices single-exit bodies ahead of a leading condition without temporaries', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js':
+					'/* @inline */ function ready(state) { const count = state.count; return count > 0; } export function run() { const state = {count: 1}; if (ready(state)) return "yes"; return "no"; }',
+			},
+			'ready'
+		);
+		const caller = result.code.slice(result.code.indexOf('function run('));
+		expect(caller).not.toContain('_result');
+		expect(caller).not.toContain('_inline');
+		expect(caller).toMatch(/const _count\w* = state\.count;\s*if \(_count\w* > 0\)/);
+	});
+
+	it('assigns a declared variable directly from a multi-exit body', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js':
+					'/* @inline */ function sign(x) { if (x < 0) return -1; if (x > 0) return 1; return 0; } export function run() { const value = sign(3); return value; }',
+			},
+			'sign'
+		);
+		const caller = result.code.slice(result.code.indexOf('function run('));
+		expect(caller).not.toContain('_result');
+		expect(caller).not.toContain('_inline');
+		expect(caller).toContain('let value;');
 	});
 
 	it('flattens block bodies at direct statement sites', async () => {
@@ -605,7 +678,9 @@ it('keeps argument capture when the parameter is evaluated after other operation
 		},
 		'read'
 	);
-	expect(result.code).toContain('_inline');
+	const caller = result.code.slice(result.code.indexOf('function run('));
+	expect(caller).not.toContain('=>');
+	expect(caller.indexOf('log.push("arg")')).toBeLessThan(caller.indexOf('before()'));
 });
 
 it('substitutes a leading data read when the remaining inputs are stable', async () => {
@@ -641,7 +716,11 @@ it('reuses initialized immutable parameter snapshots at nested inline sites', as
 		},
 		'outer'
 	);
-	expect(result.code.match(/\blet _result\d*;/g)).toHaveLength(1);
+	const caller = result.code.slice(result.code.indexOf('function run('));
+	expect(caller).not.toContain('_result');
+	expect(caller).not.toContain('_inline');
+	expect(caller.match(/\bconst _\w+ = /g)).toHaveLength(1);
+	expect(caller).toContain('context.data');
 });
 
 it('resolves injected dependency imports relative to the caller module', async () => {

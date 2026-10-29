@@ -140,6 +140,41 @@ The plugin accepts the following options:
   debug?: boolean | 'verbose';
 
   /**
+   * Keep functions that fit V8's inlining budget before expansion within it afterwards.
+   * After each transform the plugin compiles the module in a child node process, reads
+   * the bytecode length of every function, and leaves the largest expansions as calls
+   * until the function fits again. Set to `false` to skip measurement.
+   *
+   * @default { max: 460, iterations: 6 }
+   */
+  budget?: false | { max?: number; iterations?: number };
+
+  /**
+   * Directory where measured bytecode sizes persist between builds, relative to the
+   * project root. `false` keeps them in memory for the current build only.
+   *
+   * @default 'node_modules/.cache/unplugin-inline-functions'
+   */
+  cache?: false | string;
+
+  /**
+   * Compile-time constants the bundler substitutes, in the same form as its `define`
+   * option. Measurement folds branches on them, and on constants derived from them in
+   * other modules, so sizes match what the bundler emits.
+   *
+   * @example { __DEV__: 'false', 'process.env.NODE_ENV': '"production"' }
+   */
+  define?: Record<string, string>;
+
+  /**
+   * Move branches that end in a throw out of transformed functions into module-level
+   * functions. Branches marked with a `@cold` comment are always moved.
+   *
+   * @default true
+   */
+  outlineThrows?: boolean;
+
+  /**
    * Automatically discover files via `export * from` and `export { ... } from` statements.
    * When enabled, files matching the include pattern will be scanned for export statements,
    * and the referenced files will be automatically included in metadata collection.
@@ -296,6 +331,28 @@ function displayUserInfo(userId) {
     const getUser_result_0_$f = userCache.get(userId) || database.users.find(u => u.id === userId);
     const status = getUser_result_0_$f?.active ? 'Active' : 'Inactive';
     return `${greeting} Status: ${status}`;
+}
+```
+
+## Staying within V8's inlining budget
+
+TurboFan and Maglev inline a callee only while its bytecode stays under a size limit, 460 bytes by default, with a cumulative limit per optimized function. Expanding calls at the source level makes functions larger, and a function that crosses the limit stops being inlined into its own callers. The `budget` option keeps that from happening: after transforming a module the plugin compiles it eagerly in a child `node` process with `--print-bytecode`, reads the length of every function, and for each function that fit before expansion but not after, leaves its largest expansion as a call. It repeats until the function fits. Nothing executes during measurement and the child process sees types and module syntax stripped. A function that was already over the limit is left free to expand, since calls inside it cost more than size does.
+
+Measurement happens per module, before the bundler folds compile-time constants. Pass the same `define` map you give the bundler so the plugin can drop the same branches, including branches on constants that other modules derive from those defines, such as `export const debug = typeof __DEBUG__ !== 'undefined' ? __DEBUG__ : true`. With `debug: true` the plugin prints every budget decision and, for Rollup, Vite and Rolldown, the bundle functions still over the limit.
+
+Measurement adds roughly a hundred milliseconds per transformed module the first time. Sizes are cached by module content under `node_modules/.cache/unplugin-inline-functions`, so later builds only measure modules that changed. Disable measurement with `budget: false` where build time matters more than steady-state shape.
+
+## Cold branches
+
+A branch that only throws, such as an assertion failure with a formatted message, costs bytecode on the hot path without ever running on it. The plugin moves such branches out of transformed functions into module-level functions that take the values the branch reads as parameters. Mark any `if` statement or branch with `/* @cold */` to move it the same way, provided it does not write surrounding locals, use `this`, `arguments`, `await` or `yield`, or break out of an enclosing loop. A cold branch that returns becomes `return cold(...)`. The budget keeps each function under the per-callee limit, but V8 also charges a callee's whole size, cold branches included, against a cumulative limit per optimized caller. An inlined call inside a rarely taken branch of a hot function therefore costs the callers that inline it without ever running. Mark such branches `@cold` so the hot path stays small.
+
+```ts
+export function set(ctx, entity, trait, value) {
+  /* @cold */ if (isRelationPair(trait)) {
+    setPair(ctx, entity, trait, value);
+    return;
+  }
+  // hot path
 }
 ```
 

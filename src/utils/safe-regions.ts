@@ -1,5 +1,6 @@
-import { Binding, NodePath } from '@babel/traverse';
+import { Binding, NodePath, Scope } from '@babel/traverse';
 import * as t from '@babel/types';
+import { bindingKey } from '../collect-metadata';
 
 // Tokens represent runtime value identity, never generated source text or variable names.
 type Value = object;
@@ -21,10 +22,15 @@ interface RegionVisitor {
 	declaration?(path: NodePath<t.VariableDeclarator>, evaluation: Evaluation): void;
 }
 
-function propertyKey(node: t.Node, computed: boolean): string | undefined {
+/** A property name, or a token for a constant binding used as a computed key such as a symbol. */
+function propertyKey(node: t.Node, computed: boolean, scope: Scope): string | undefined {
 	if (!computed && t.isIdentifier(node)) return node.name;
 	if (t.isStringLiteral(node) || t.isNumericLiteral(node)) return String(node.value);
-	return undefined;
+	if (!computed || !t.isIdentifier(node)) return undefined;
+	const binding = scope.getBinding(node.name);
+	if (!binding?.constant || !['const', 'module'].includes(binding.kind)) return undefined;
+	const key = bindingKey(binding.identifier);
+	return key && `\0${key}`;
 }
 
 /** Facts expire at any operation that might observe or mutate memory, throw, or suspend. */
@@ -94,7 +100,7 @@ class Region {
 			for (const property of path.get('properties')) {
 				// Reject accessors, spreads, methods, dynamic keys, and prototype setters.
 				if (!property.isObjectProperty()) return this.unknown();
-				const key = propertyKey(property.node.key, property.node.computed);
+				const key = propertyKey(property.node.key, property.node.computed, property.scope);
 				if (key === undefined || key === '__proto__') return this.unknown();
 				const result = this.evaluate(property.get('value'));
 				pure &&= result.pure;
@@ -107,7 +113,7 @@ class Region {
 		}
 		if (path.isMemberExpression()) {
 			const object = this.evaluate(path.get('object'));
-			const key = propertyKey(path.node.property, path.node.computed);
+			const key = propertyKey(path.node.property, path.node.computed, path.scope);
 			const properties = this.objects.get(object.value);
 			if (key === undefined || !properties?.has(key)) return this.unknown();
 			const read = { object: object.value, key };
@@ -133,7 +139,7 @@ class Region {
 			this.bindings.set(binding, result.value);
 		} else if (left.isMemberExpression()) {
 			const object = this.evaluate(left.get('object'));
-			const key = propertyKey(left.node.property, left.node.computed);
+			const key = propertyKey(left.node.property, left.node.computed, left.scope);
 			const properties = this.objects.get(object.value);
 			if (!object.pure || key === undefined || !properties?.has(key)) return this.clear();
 			const result = this.evaluate(path.get('right'));
