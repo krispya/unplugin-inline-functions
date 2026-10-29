@@ -9,7 +9,13 @@ import { createUnplugin } from 'unplugin';
 import { collectMetadata, resetMetadata } from './collect-metadata';
 import { Expansion, inlineFunctions } from './inline-functions';
 import { parseDefines } from './utils/constant-folding';
-import { functionKey, lastMeasureFailure, measureBytecode } from './utils/measure-bytecode';
+import {
+	functionKey,
+	lastMeasureFailure,
+	measureBytecode,
+	measureCacheStats,
+	setMeasureCache,
+} from './utils/measure-bytecode';
 import { STATS } from './stats';
 import { discoverFilesViaReferences } from './utils/discover-files';
 import { findProjectRoot } from './utils/find-project-root';
@@ -67,9 +73,17 @@ export interface InlineFunctionsOptions {
 	 * the largest expansions are left as calls until the function fits. `false` disables
 	 * measurement.
 	 *
-	 * @default { max: 460, iterations: 4 }
+	 * @default { max: 460, iterations: 6 }
 	 */
 	budget?: false | { max?: number; iterations?: number };
+
+	/**
+	 * Directory where measured bytecode sizes persist between builds, relative to the
+	 * project root. `false` keeps them in memory for the current build only.
+	 *
+	 * @default 'node_modules/.cache/unplugin-inline-functions'
+	 */
+	cache?: false | string;
 
 	/**
 	 * Compile-time constants the bundler will substitute, in the same form as its own
@@ -184,6 +198,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		followPackageImports = false,
 		resolveImport,
 		budget = {},
+		cache = 'node_modules/.cache/unplugin-inline-functions',
 		outlineThrows = true,
 		define = {},
 	} = options;
@@ -198,6 +213,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 
 	let initialized = false;
 	const projectRoot = realpathSafe(findProjectRoot(cwd));
+	setMeasureCache(cache === false ? false : path.resolve(projectRoot, cache));
 	const detectedWorkspaceRoot = realpathSafe(workspaceRoot || findWorkspaceRoot(projectRoot));
 
 	if (isDebugEnabled(debug)) {
@@ -328,6 +344,9 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 	function logStats() {
 		if (budgetLog.length && isDebugEnabled(debug)) {
 			console.log(chalk.green('\n✓ Inline budget:'));
+			console.log(
+				`  measurements: ${measureCacheStats.misses} fresh, ${measureCacheStats.hits} from cache`
+			);
 			for (const line of budgetLog) console.log(`  ${line}`);
 		}
 		const counts = Array.from(STATS.getAllInlinedFunctionCounts()).filter(
@@ -382,7 +401,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 			);
 			return null;
 		}
-		const [sizes] = measureBytecode([ast], defines) ?? [];
+		const [sizes] = measureBytecode([{ ast, text: code }], defines) ?? [];
 		if (!sizes) {
 			console.log(
 				chalk.yellow(
@@ -478,7 +497,13 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 					iteration < budgetIterations && result.expansions.size;
 					iteration++
 				) {
-					const measured = measureBytecode([parseModule(), result.ast], defines);
+					const measured = measureBytecode(
+						[
+							{ ast: parseModule(), text: code },
+							{ ast: result.ast, text: result.output },
+						],
+						defines
+					);
 					if (!measured) {
 						budgetLog.push(
 							`${path.relative(cwd, id)}: not measured, ${lastMeasureFailure}`

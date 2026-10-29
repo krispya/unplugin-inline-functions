@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import inlineFunctions from '../src/esbuild';
 import { collectMetadata, resetMetadata } from '../src/collect-metadata';
 import { parseDefines } from '../src/utils/constant-folding';
-import { measureBytecode } from '../src/utils/measure-bytecode';
+import { measureBytecode, measureCacheStats, setMeasureCache } from '../src/utils/measure-bytecode';
 import { setResolutionConfig } from '../src/utils/resolution-config';
 
 async function bundle(files: Record<string, string>, options: Record<string, unknown>) {
@@ -84,6 +84,26 @@ describe('bytecode measurement', () => {
 		fs.rmSync(directory, { recursive: true, force: true });
 		const size = (sizes: Map<unknown, number>) => [...sizes.values()][0];
 		expect(size(folded)).toBeLessThan(size(loose) / 2);
+	});
+});
+
+describe('measurement cache', () => {
+	it('reuses sizes from disk for an unchanged module', () => {
+		const directory = fs.mkdtempSync(path.join(tmpdir(), 'inline-cache-'));
+		const ast = parse('function area(w, h) { return w * h }', { sourceType: 'module' });
+		try {
+			setMeasureCache(directory);
+			const first = measureBytecode([ast]);
+			expect(measureCacheStats).toEqual({ hits: 0, misses: 1 });
+			setMeasureCache(directory);
+			const second = measureBytecode([ast]);
+			expect(measureCacheStats).toEqual({ hits: 1, misses: 0 });
+			expect([...second![0].values()]).toEqual([...first![0].values()]);
+			expect(fs.readdirSync(directory)).toHaveLength(1);
+		} finally {
+			setMeasureCache(false);
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
 

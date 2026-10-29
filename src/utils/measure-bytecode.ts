@@ -2,7 +2,7 @@ import _generate from '@babel/generator';
 import _traverse, { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +25,47 @@ export let lastMeasureFailure: string | undefined;
 /** Whether this runtime can compile and report bytecode through a child process. */
 export function canMeasureBytecode() {
 	return !unavailable && Boolean(process.versions.node) && !process.versions.bun;
+}
+
+let cacheDirectory: string | false = false;
+const cached = new Map<string, (number | null)[]>();
+/** Cache activity for the current build, reported in debug output. */
+export const measureCacheStats = { hits: 0, misses: 0 };
+
+/** Where measured sizes persist between builds. `false` keeps them in memory only. */
+export function setMeasureCache(directory: string | false) {
+	cacheDirectory = directory;
+	cached.clear();
+	measureCacheStats.hits = 0;
+	measureCacheStats.misses = 0;
+}
+
+/** Sizes depend on the exact script and the V8 that compiles it. */
+function cacheKey(code: string) {
+	return createHash('sha1').update(process.version).update(code).digest('hex');
+}
+
+function readCache(key: string) {
+	const hit = cached.get(key);
+	if (hit || !cacheDirectory) return hit;
+	try {
+		const sizes = JSON.parse(fs.readFileSync(path.join(cacheDirectory, `${key}.json`), 'utf8'));
+		cached.set(key, sizes);
+		return sizes as (number | null)[];
+	} catch {
+		return;
+	}
+}
+
+function writeCache(key: string, sizes: (number | null)[]) {
+	cached.set(key, sizes);
+	if (!cacheDirectory) return;
+	try {
+		fs.mkdirSync(cacheDirectory, { recursive: true });
+		fs.writeFileSync(path.join(cacheDirectory, `${key}.json`), JSON.stringify(sizes));
+	} catch {
+		// A cache that cannot be written only costs time.
+	}
 }
 
 function collectFunctions(ast: t.Node) {
@@ -158,8 +199,14 @@ function prepareScript(ast: t.File, prefix: string, defines: Map<string, Constan
  * every function. Nothing executes. Returns one map per module, or undefined when the
  * runtime cannot report bytecode.
  */
+/** A module to measure. `text` is a cheap identity for the AST content used as the cache key. */
+export interface MeasureInput {
+	ast: t.File;
+	text?: string;
+}
+
 export function measureBytecode(
-	asts: t.File[],
+	inputs: (t.File | MeasureInput)[],
 	defines: Map<string, Constant> = new Map()
 ): Map<t.Function, number>[] | undefined {
 	if (!canMeasureBytecode()) {
@@ -167,10 +214,59 @@ export function measureBytecode(
 		return;
 	}
 	lastMeasureFailure = undefined;
-	const prepared = asts.map((ast, index) => prepareScript(ast, `__m${index}_`, defines));
-	if (prepared.some((entry) => !entry)) return;
+	const entries = inputs.map((input) => ('ast' in input ? input : { ast: input }));
+	const defineKey = JSON.stringify([...defines]);
+	// A module with a text key is looked up before the script is prepared, which is the
+	// expensive part. Each module is cached on its own so an unchanged original hits while
+	// its transform misses.
+	const keys: (string | undefined)[] = entries.map((entry) =>
+		entry.text ? cacheKey(defineKey + entry.text) : undefined
+	);
+	const sizes: ((number | null)[] | undefined)[] = keys.map((key) =>
+		key ? readCache(key) : undefined
+	);
+	const prepared = entries.map((entry, index) =>
+		sizes[index] ? undefined : prepareScript(entry.ast, '__m_', defines)
+	);
+	const misses = sizes.flatMap((hit, index) => (hit ? [] : [index]));
+	if (misses.some((index) => !prepared[index])) return;
+	for (const index of misses) {
+		const key = keys[index] || cacheKey(prepared[index]!.code);
+		keys[index] = key;
+		const hit = readCache(key);
+		if (hit) sizes[index] = hit;
+	}
+	const fresh = misses.filter((index) => !sizes[index]);
+	measureCacheStats.hits += entries.length - fresh.length;
+	measureCacheStats.misses += fresh.length;
+	if (fresh.length) {
+		const measured = runMeasurement(
+			fresh.map((index) => prepared[index]!.code.replaceAll('__m_', `__m${index}_`)).join('')
+		);
+		if (!measured) return;
+		for (const index of fresh) {
+			const result = prepared[index]!.originals.map(
+				(_, position) => measured.get(`__m${index}_${position}`) ?? null
+			);
+			writeCache(keys[index]!, result);
+			sizes[index] = result;
+		}
+	}
+	return entries.map((entry, index) => {
+		const result = new Map<t.Function, number>();
+		const functions = prepared[index]?.originals ?? collectFunctions(entry.ast);
+		functions.forEach((node, position) => {
+			const size = sizes[index]![position];
+			if (size !== null && size !== undefined) result.set(node, size);
+		});
+		return result;
+	});
+}
+
+/** Compile a script in a child node process and collect each function's bytecode length. */
+function runMeasurement(script: string) {
 	const file = path.join(os.tmpdir(), `inline-measure-${randomBytes(6).toString('hex')}.js`);
-	fs.writeFileSync(file, prepared.map((entry) => entry!.code).join(''));
+	fs.writeFileSync(file, script);
 	let stdout: string;
 	try {
 		const result = spawnSync(
@@ -199,12 +295,5 @@ export function measureBytecode(
 		const length = /Bytecode length: (\d+)/.exec(line);
 		if (length && name) sizes.set(name, Number(length[1]));
 	}
-	return prepared.map((entry, index) => {
-		const result = new Map<t.Function, number>();
-		entry!.originals.forEach((node, position) => {
-			const size = sizes.get(`__m${index}_${position}`);
-			if (size !== undefined) result.set(node, size);
-		});
-		return result;
-	});
+	return sizes;
 }

@@ -150,6 +150,14 @@ The plugin accepts the following options:
   budget?: false | { max?: number; iterations?: number };
 
   /**
+   * Directory where measured bytecode sizes persist between builds, relative to the
+   * project root. `false` keeps them in memory for the current build only.
+   *
+   * @default 'node_modules/.cache/unplugin-inline-functions'
+   */
+  cache?: false | string;
+
+  /**
    * Compile-time constants the bundler substitutes, in the same form as its `define`
    * option. Measurement folds branches on them, and on constants derived from them in
    * other modules, so sizes match what the bundler emits.
@@ -332,7 +340,7 @@ TurboFan and Maglev inline a callee only while its bytecode stays under a size l
 
 Measurement happens per module, before the bundler folds compile-time constants. Pass the same `define` map you give the bundler so the plugin can drop the same branches, including branches on constants that other modules derive from those defines, such as `export const debug = typeof __DEBUG__ !== 'undefined' ? __DEBUG__ : true`. With `debug: true` the plugin prints every budget decision and, for Rollup, Vite and Rolldown, the bundle functions still over the limit.
 
-Measurement adds roughly a hundred milliseconds per transformed module. Disable it with `budget: false` where build time matters more than steady-state shape.
+Measurement adds roughly a hundred milliseconds per transformed module the first time. Sizes are cached by module content under `node_modules/.cache/unplugin-inline-functions`, so later builds only measure modules that changed. Disable measurement with `budget: false` where build time matters more than steady-state shape.
 
 ## Cold branches
 
