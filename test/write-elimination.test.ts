@@ -33,6 +33,11 @@ async function execute(source: string) {
 
 const safe = [
 	[
+		'overwritten constant computed slots',
+		'const key = Symbol("k"); const object = {[key]: 0}; object[key] = 1; object[key] = 2; return object[key];',
+		'object[key] = 1;',
+	],
+	[
 		'overwritten own data stores',
 		'const object = {x: 0}; object.x = 1; object.x = 2; return object.x;',
 		'object.x = 1;',
@@ -119,9 +124,10 @@ describe('safe write elimination', () => {
 		resetMetadata();
 		collectMetadata(ast);
 		const code = inlineFunctions(ast);
-		expect(code).toMatch(/const _second\w* = _first\w*;/);
-		expect(code).not.toMatch(/_object\w*\.x = 10/);
-		expect(code).toMatch(/_object\w*\.x = 20/);
+		const caller = code.slice(code.indexOf('function run('));
+		expect(caller).toMatch(/const _second\w* = _first\w*;/);
+		expect(caller).not.toMatch(/\bobject\.x = 10/);
+		expect(caller).toMatch(/\bobject\.x = 20/);
 		expect(await execute(code)).toEqual(await execute(source));
 	});
 });
