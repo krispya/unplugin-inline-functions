@@ -1,0 +1,57 @@
+unplugin-inline-functions 0.6.0
+
+Highlights
+
+- Add a V8 bytecode budget. By default, the plugin measures transformed
+  functions and leaves large expansions as calls when they would push a
+  previously eligible function over the configured budget.
+- Reduce generated wrappers and labels through statement insertion,
+  expression lowering, and structured early returns where safe.
+- Move eligible throwing branches and explicit @cold branches into separate
+  functions to reduce hot-function size.
+- Cache bytecode measurements in memory and on disk between builds.
+- Support known primitive computed keys while preserving key coercion,
+  initialization errors, and reads through aliases. Keys without primitive
+  proof, including unresolved symbol and object keys, remain conservative.
+
+Options and defaults
+
+- budget: { max: 460, iterations: 6 }. Set budget: false to disable measurement.
+- cache: 'node_modules/.cache/unplugin-inline-functions'. Set cache: false
+  to keep measurements in memory only.
+- define: {}. Pass the same expression-string map used by the bundler so
+  measurement can account for branches that compile-time constants remove.
+- outlineThrows: true. Set false to disable automatic throw outlining.
+  Explicit @cold annotations remain eligible for outlining.
+
+Operational notes
+
+Bytecode measurement starts a child Node process and compiles a copy of the
+module without executing its code. The first measurement adds build work;
+later builds can reuse cached measurements. V8 versions and workloads differ,
+so benchmark annotated hot paths rather than assuming a universal speedup.
+
+The declared minimum Node version remains 22.13. The package manager is pnpm
+12.16.1, and the declared pnpm engine remains >=12.0.0. Runtime Babel generator
+dependency handling from 0.5.0 is retained.
+
+Validation
+
+- 253 plugin tests, TS7 type checking, and the ESM/CommonJS declaration build
+  pass.
+- A production-only, non-hoisted consumer passes 12 import/require entrypoint
+  checks, six build/budget checks, and persistent-cache verification.
+- Koota canary ea16394 built against the packed plugin passes 625 tests with
+  4 existing expected failures across its ESM/CommonJS API suites.
+
+Manual release
+
+After checking out the prepared release commit on main, run:
+
+  pnpm run release
+
+This command rebuilds and publishes to npm and may request browser
+authentication. Publication has not been performed during preparation.
+
+If creating a GitHub release, use tag v0.6.0 at the release preparation commit.
+No release tag or GitHub release has been created during preparation.
