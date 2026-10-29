@@ -294,7 +294,8 @@ export function prepareInlineFunction(
 export function stableArgument(
 	node: t.Expression,
 	call: NodePath<t.CallExpression>,
-	initializedSnapshots?: WeakSet<t.Identifier>
+	initializedSnapshots?: WeakSet<t.Identifier>,
+	loweredParameters?: WeakSet<t.Identifier>
 ): boolean {
 	if (
 		t.isNumericLiteral(node) ||
@@ -307,13 +308,16 @@ export function stableArgument(
 	if (!t.isIdentifier(node)) return false;
 	const binding = call.scope.getBinding(node.name);
 	const owner = call.getFunctionParent();
-	if (!binding?.constant || !owner || binding.scope.getFunctionParent() !== owner.scope)
-		return false;
+	if (!binding || !owner || binding.scope.getFunctionParent() !== owner.scope) return false;
+	// A lowered parameter is assigned once, ahead of every use inside its expression.
+	const lowered =
+		loweredParameters?.has(binding.identifier) && binding.constantViolations.length <= 1;
+	if (!binding.constant && !lowered) return false;
 	// A call inside a parameter initializer can precede initialization of later parameters.
 	if (!call.findParent((path) => path === owner.get('body'))) return false;
 	// Invocation snapshots are initialized before entering their cloned body,
 	// including nested inline sites whose generated declarations have no source loc.
-	if (initializedSnapshots?.has(binding.identifier)) return true;
+	if (lowered || initializedSnapshots?.has(binding.identifier)) return true;
 	if (binding.kind === 'param') return true;
 	return (
 		binding.kind === 'const' &&
