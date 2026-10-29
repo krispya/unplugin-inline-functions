@@ -1,4 +1,5 @@
 import { parse } from '@babel/parser';
+import * as t from '@babel/types';
 import chalk from 'chalk';
 import fg from 'fast-glob';
 import { createHash } from 'node:crypto';
@@ -6,7 +7,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createUnplugin } from 'unplugin';
 import { collectMetadata, resetMetadata } from './collect-metadata';
-import { inlineFunctions } from './inline-functions';
+import { Expansion, inlineFunctions } from './inline-functions';
+import { parseDefines } from './utils/constant-folding';
+import { functionKey, lastMeasureFailure, measureBytecode } from './utils/measure-bytecode';
 import { STATS } from './stats';
 import { discoverFilesViaReferences } from './utils/discover-files';
 import { findProjectRoot } from './utils/find-project-root';
@@ -57,6 +60,33 @@ export interface InlineFunctionsOptions {
 	 * @example { '@/*': './src/*' }
 	 */
 	alias?: Record<string, string>;
+
+	/**
+	 * Keep functions that were within V8's inlining budget before expansion within it
+	 * afterwards. Bytecode is measured in a child node process after each transform, and
+	 * the largest expansions are left as calls until the function fits. `false` disables
+	 * measurement.
+	 *
+	 * @default { max: 460, iterations: 4 }
+	 */
+	budget?: false | { max?: number; iterations?: number };
+
+	/**
+	 * Compile-time constants the bundler will substitute, in the same form as its own
+	 * `define` option, so that bytecode measurement sees the branches it will drop.
+	 *
+	 * @example { __DEV__: 'false', 'process.env.NODE_ENV': '"production"' }
+	 */
+	define?: Record<string, string>;
+
+	/**
+	 * Move branches that end in a throw out of transformed functions into module-level
+	 * functions, so error paths do not count against the hot path's size. Branches marked
+	 * with a `@cold` comment are always moved.
+	 *
+	 * @default true
+	 */
+	outlineThrows?: boolean;
 
 	/**
 	 * Enable debug logging to help diagnose issues.
@@ -153,7 +183,18 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		followImports = true,
 		followPackageImports = false,
 		resolveImport,
+		budget = {},
+		outlineThrows = true,
+		define = {},
 	} = options;
+	const budgetMax = budget === false ? Infinity : (budget.max ?? 460);
+	const budgetIterations = budget === false ? 0 : (budget.iterations ?? 6);
+	const defines = parseDefines(define);
+	// Functions that cannot fit however many expansions are left as calls keep all of them.
+	const settled = new Set<string>();
+	// Function key -> callee keys left as calls so the function stays within budget.
+	const exclusions = new Map<string, Set<string>>();
+	const budgetLog: string[] = [];
 
 	let initialized = false;
 	const projectRoot = realpathSafe(findProjectRoot(cwd));
@@ -285,6 +326,10 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 	 * Log statistics about inlined functions.
 	 */
 	function logStats() {
+		if (budgetLog.length && isDebugEnabled(debug)) {
+			console.log(chalk.green('\n✓ Inline budget:'));
+			for (const line of budgetLog) console.log(`  ${line}`);
+		}
 		const counts = Array.from(STATS.getAllInlinedFunctionCounts()).filter(
 			([name]) => name.trim() !== ''
 		);
@@ -323,6 +368,41 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 			}
 			console.log('');
 		}
+	}
+
+	/** Report bundle functions over budget. The bundle is where V8 sees them. */
+	function reportBundle(code: string) {
+		if (budget === false || !isDebugEnabled(debug)) return null;
+		let ast;
+		try {
+			ast = parse(code, { sourceType: 'module', plugins: ['jsx'] });
+		} catch (error) {
+			console.log(
+				chalk.yellow(`[unplugin-inline-functions] Bundle report skipped: ${String(error)}`)
+			);
+			return null;
+		}
+		const [sizes] = measureBytecode([ast], defines) ?? [];
+		if (!sizes) {
+			console.log(
+				chalk.yellow(
+					`[unplugin-inline-functions] Bundle report skipped: ${lastMeasureFailure}`
+				)
+			);
+			return null;
+		}
+		const over = [...sizes]
+			.filter(([, size]) => size > budgetMax)
+			.map(
+				([node, size]) =>
+					`${t.isFunctionDeclaration(node) && node.id ? node.id.name : node.type} ${size}`
+			)
+			.sort();
+		console.log(
+			chalk.green(`\n✓ Bundle functions over ${budgetMax} bytes: ${over.length}`) +
+				(over.length ? `\n  ${over.join('\n  ')}` : '')
+		);
+		return null;
 	}
 
 	return {
@@ -369,17 +449,90 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 			}
 
 			try {
-				// Parse or use cached AST
-				const ast =
-					astCache.get(hash) ??
+				const parseModule = () =>
 					parse(code, {
 						sourceType: 'module',
 						plugins: ['typescript', 'jsx'],
 						sourceFilename: id,
 					});
+				const run = (ast: ReturnType<typeof parseModule>) => {
+					const expansions = new Map<t.Function, Expansion[]>();
+					const output = inlineFunctions(ast, {
+						expansions,
+						outlineThrows,
+						skip: (fn, calleeKey) => {
+							const key = functionKey(fn);
+							return (
+								key !== undefined && (exclusions.get(key)?.has(calleeKey) ?? false)
+							);
+						},
+					});
+					return { ast, expansions, output };
+				};
+				let result = run(astCache.get(hash) ?? parseModule());
 
-				// Transform the code
-				const transformedCode = inlineFunctions(ast);
+				// Leave the largest expansions as calls until every function that fit
+				// V8's inlining budget before expansion fits again.
+				for (
+					let iteration = 0;
+					iteration < budgetIterations && result.expansions.size;
+					iteration++
+				) {
+					const measured = measureBytecode([parseModule(), result.ast], defines);
+					if (!measured) {
+						budgetLog.push(
+							`${path.relative(cwd, id)}: not measured, ${lastMeasureFailure}`
+						);
+						break;
+					}
+					const sizes = measured.map((entry) => {
+						const byKey = new Map<string, number>();
+						for (const [node, size] of entry) {
+							const key = functionKey(node);
+							if (key) byKey.set(key, size);
+						}
+						return byKey;
+					});
+					let changed = false;
+					for (const [fn, list] of result.expansions) {
+						const key = functionKey(fn);
+						if (!key) continue;
+						const before = sizes[0].get(key);
+						const after = sizes[1].get(key);
+						if (
+							before === undefined ||
+							after === undefined ||
+							before > budgetMax ||
+							after <= budgetMax
+						)
+							continue;
+						if (settled.has(key)) continue;
+						const label = `${path.relative(cwd, id)}: ${fn.type === 'FunctionDeclaration' && fn.id ? fn.id.name : key}`;
+						const excluded = exclusions.get(key) ?? new Set<string>();
+						const next = list
+							.filter((expansion) => !excluded.has(expansion.key))
+							.sort((a, b) => b.weight - a.weight)[0];
+						changed = true;
+						if (!next) {
+							// Over budget even as calls: expand everything and stop trying.
+							settled.add(key);
+							exclusions.delete(key);
+							budgetLog.push(
+								`${label} stays over ${budgetMax} bytes (${after}), expanding all`
+							);
+							continue;
+						}
+						excluded.add(next.key);
+						exclusions.set(key, excluded);
+						budgetLog.push(
+							`${label} ${before} -> ${after} bytes, keeping ${next.name} as a call`
+						);
+					}
+					if (!changed) break;
+					result = run(parseModule());
+				}
+
+				const transformedCode = result.output;
 				codeCache.set(hash, transformedCode);
 
 				return {
@@ -395,6 +548,10 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 			// Log statistics after build completes
 			logStats();
 		},
+
+		rollup: { renderChunk: reportBundle },
+		vite: { renderChunk: reportBundle },
+		rolldown: { renderChunk: reportBundle },
 	};
 });
 

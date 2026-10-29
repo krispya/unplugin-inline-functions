@@ -1,5 +1,5 @@
 import { ParseResult } from '@babel/parser';
-import _traverse, { Binding, NodePath } from '@babel/traverse';
+import _traverse, { Binding, NodePath, Scope } from '@babel/traverse';
 import * as t from '@babel/types';
 import { getBabelDefaultExport } from './utils/babel-exports';
 import { hasInlineDecorator, hasPureDecorator } from './utils/decorator-utils';
@@ -234,6 +234,46 @@ export function exportedBindingName(binding: Binding): string | undefined {
 		)
 			return 'default';
 	}
+}
+
+/** The initializer of a constant a module exports under a name, following one re-export. */
+export function exportedConstant(
+	filename: string,
+	name: string,
+	depth = 0
+): { init: t.Expression; scope: Scope } | undefined {
+	const module = modules.get(filename);
+	if (!module || depth > 4) return;
+	for (const statement of module.get('body')) {
+		if (!statement.isExportNamedDeclaration() || statement.node.exportKind === 'type') continue;
+		const declaration = statement.get('declaration');
+		if (declaration.isVariableDeclaration({ kind: 'const' })) {
+			for (const declarator of declaration.get('declarations')) {
+				if (t.isIdentifier(declarator.node.id, { name }) && declarator.node.init)
+					return { init: declarator.node.init, scope: declarator.scope };
+			}
+			continue;
+		}
+		for (const specifier of statement.node.specifiers) {
+			if (!t.isExportSpecifier(specifier)) continue;
+			const exported = t.isIdentifier(specifier.exported)
+				? specifier.exported.name
+				: specifier.exported.value;
+			if (exported !== name) continue;
+			if (statement.node.source) {
+				const source = resolveSource(statement.node.source.value, filename);
+				return source ? exportedConstant(source, specifier.local.name, depth + 1) : undefined;
+			}
+			const binding = module.scope.getBinding(specifier.local.name);
+			if (
+				binding?.kind === 'const' &&
+				binding.path.isVariableDeclarator() &&
+				binding.path.node.init
+			)
+				return { init: binding.path.node.init, scope: binding.path.scope };
+		}
+	}
+	return;
 }
 
 export function resetMetadata() {
