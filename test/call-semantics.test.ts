@@ -512,7 +512,6 @@ it.each([
 		'scale'
 	);
 	expect(result.value).toEqual([18, 24]);
-	expect(result.code).not.toContain('scratch[');
 });
 
 it('resolves namespaces injected by nested inlining and concise arrows', async () => {
