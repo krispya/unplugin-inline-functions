@@ -489,6 +489,61 @@ describe('module bindings', () => {
 	});
 });
 
+it.each([
+	["import * as vector from './vec.js';", 'vector.scale'],
+	["import {vec as vector} from './index.js';", 'vector.scale'],
+	["import * as math from './index.js';", 'math.vec["scale"]'],
+	["import {vectors as vector} from './alias.js';", 'vector.scale'],
+])('inlines namespace math chains: %s', async (imports, call) => {
+	const result = await compareBuilds(
+		{
+			'vec.js': `export /* @inline */ function scale(out, input, factor) {
+			out[0] = input[0] * factor; out[1] = input[1] * factor;
+		}`,
+			'core.js': "export * as vec from './vec.js';",
+			'index.js': "export * from './core.js';",
+			'alias.js': "import {vec as value} from './index.js'; export {value as vectors};",
+			'main.js': `${imports} export function run() {
+			const scratch = [0, 0]; const out = [0, 0];
+			${call}(scratch, [3, 4], 2); ${call}(out, scratch, 3);
+			return out;
+		}`,
+		},
+		'scale'
+	);
+	expect(result.value).toEqual([18, 24]);
+});
+
+it('resolves namespaces injected by nested inlining and concise arrows', async () => {
+	const result = await compareBuilds(
+		{
+			'vec.js': 'export /* @inline */ function twice(x) { return x * 2; }',
+			'lib.js':
+				"import * as vec from './vec.js'; export /* @inline */ function calculate(x) { return vec.twice(x) + 1; }",
+			'main.js': "import * as lib from './lib.js'; export const run = () => lib.calculate(3);",
+		},
+		'twice'
+	);
+	expect(result.value).toBe(7);
+	expect(result.code).not.toMatch(/(?<!function )\bcalculate\s*\(/);
+});
+
+it('preserves namespace receivers, dynamic keys, mutable exports and shadowing', async () => {
+	await compareBuilds({
+		'vec.js': `export const offset = 4;
+			export /* @inline */ function read() { return this?.offset ?? -1; }
+			export /* @inline */ function twice(x) { return x * 2; }
+			export /* @inline */ let live = (x) => x;
+			export function replace() { live = (x) => x + 10; }`,
+		'main.js': `import * as vec from './vec.js'; export function run() {
+			const log = []; function key() { log.push('key'); return 'twice'; }
+			function shadow(vec) { return vec.twice(3); }
+			const before = vec.live(1); vec.replace();
+			return [vec.read(), vec[key()](3), shadow({twice: x => x + 1}), before, vec.live(1), log];
+		}`,
+	});
+});
+
 it('erases cloned TypeScript annotations when the caller is JavaScript', async () => {
 	await compareBuilds(
 		{

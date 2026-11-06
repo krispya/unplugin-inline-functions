@@ -4,7 +4,7 @@ import * as t from '@babel/types';
 import { getBabelDefaultExport } from './utils/babel-exports';
 import { hasInlineDecorator, hasPureDecorator } from './utils/decorator-utils';
 import { getResolutionConfig } from './utils/resolution-config';
-import { resolveModulePath } from './utils/resolve-module-path';
+import { ResolvedModulePath, resolveModulePath } from './utils/resolve-module-path';
 
 const traverse = getBabelDefaultExport(_traverse);
 type InlineFunction = t.FunctionDeclaration | t.FunctionExpression | t.ArrowFunctionExpression;
@@ -24,6 +24,28 @@ export const inlinableFunctions = new Map<string, InlinableFunction>();
 export const pureFunctions = new Set<string>();
 const functionsByLocation = new Map<string, InlinableFunction>();
 const modules = new Map<string, NodePath<t.Program>>();
+type ResolvedValue = InlinableFunction | { namespace: string } | { unknown: string };
+const sourceResolutions = new Map<string, ResolvedModulePath>();
+const exportResolutions = new Map<string, ResolvedValue | undefined>();
+let resolutionConfig: ReturnType<typeof getResolutionConfig>;
+
+function clearResolutions() {
+	sourceResolutions.clear();
+	exportResolutions.clear();
+}
+
+function currentResolutionConfig() {
+	const config = getResolutionConfig();
+	if (config !== resolutionConfig) {
+		clearResolutions();
+		resolutionConfig = config;
+	}
+	return config;
+}
+
+function valueKey(value: ResolvedValue) {
+	return 'namespace' in value ? value.namespace : 'unknown' in value ? value.unknown : value.key;
+}
 
 export function bindingKey(node: t.Node): string | undefined {
 	const loc = node.loc;
@@ -42,6 +64,7 @@ function functionNode(binding: Binding): InlineFunction | undefined {
 }
 
 export function collectMetadata(ast: ParseResult<t.File>) {
+	clearResolutions();
 	// Keep definitions immutable: transforming one module must not change another call's template.
 	const snapshot = t.cloneNode(ast, true);
 	traverse(snapshot, {
@@ -87,45 +110,66 @@ export function collectMetadata(ast: ParseResult<t.File>) {
 	});
 }
 
-export function resolveSource(source: string, importer: string): string | undefined {
-	const config = getResolutionConfig();
+function resolveModule(source: string, importer: string) {
+	const config = currentResolutionConfig();
 	if (!config) return;
+	const key = JSON.stringify([importer, source]);
+	const known = sourceResolutions.get(key);
+	if (known) return known;
 	const resolution = resolveModulePath(source, importer, config);
-	return resolution.isLocal ? resolution.resolved || undefined : undefined;
+	sourceResolutions.set(key, resolution);
+	return resolution;
+}
+
+export function resolveSource(source: string, importer: string): string | undefined {
+	const resolution = resolveModule(source, importer);
+	return resolution?.isLocal ? resolution.resolved || undefined : undefined;
 }
 
 export function sameExternalSource(source: string, original: string, caller: string): boolean {
-	const config = getResolutionConfig();
-	if (!config) return false;
-	const originalTarget = resolveModulePath(source, original, config).resolved;
-	return (
-		originalTarget !== null &&
-		originalTarget === resolveModulePath(source, caller, config).resolved
-	);
+	const originalTarget = resolveModule(source, original)?.resolved;
+	return originalTarget != null && originalTarget === resolveModule(source, caller)?.resolved;
 }
 
-function exportedFunction(
+function exportedValue(
 	filename: string,
 	name: string,
 	visited: Set<string>
-): InlinableFunction | undefined {
-	const key = `${filename}:${name}`;
+): ResolvedValue | undefined {
+	currentResolutionConfig();
+	const key = JSON.stringify([filename, name]);
+	// Cache complete queries only, since a cycle can truncate an intermediate lookup.
+	if (!visited.size) {
+		if (exportResolutions.has(key)) return exportResolutions.get(key);
+		const result = findExportedValue(filename, name, visited);
+		exportResolutions.set(key, result);
+		return result;
+	}
+	return findExportedValue(filename, name, visited);
+}
+
+function findExportedValue(
+	filename: string,
+	name: string,
+	visited: Set<string>
+): ResolvedValue | undefined {
+	const key = JSON.stringify([filename, name]);
 	if (visited.has(key)) return;
 	visited.add(key);
 	const module = modules.get(filename);
-	if (!module) return;
-	let starExport: InlinableFunction | undefined;
+	if (!module) return { unknown: key };
 	for (const statement of module.node.body) {
 		if (t.isExportDefaultDeclaration(statement) && name === 'default') {
 			if (t.isIdentifier(statement.declaration))
-				return resolveBinding(module.scope.getBinding(statement.declaration.name), visited);
-			if (t.isFunctionDeclaration(statement.declaration) && statement.declaration.id)
-				return resolveBinding(
-					module.scope.getBinding(statement.declaration.id.name),
-					visited
+				return (
+					resolveValue(module.scope.getBinding(statement.declaration.name), visited) ?? {
+						unknown: key,
+					}
 				);
+			if (t.isFunctionDeclaration(statement.declaration) && statement.declaration.id)
+				return resolveValue(module.scope.getBinding(statement.declaration.id.name), visited);
 			const location = bindingKey(statement.declaration);
-			return location ? functionsByLocation.get(location) : undefined;
+			return (location ? functionsByLocation.get(location) : undefined) ?? { unknown: key };
 		}
 		if (t.isExportNamedDeclaration(statement)) {
 			if (statement.exportKind === 'type') continue;
@@ -133,29 +177,47 @@ function exportedFunction(
 				statement.declaration &&
 				name in t.getOuterBindingIdentifiers(statement.declaration)
 			) {
-				return resolveBinding(module.scope.getBinding(name), visited);
+				return resolveValue(module.scope.getBinding(name), visited) ?? { unknown: key };
 			}
 			for (const specifier of statement.specifiers) {
+				if (t.isExportNamespaceSpecifier(specifier) && specifier.exported.name === name) {
+					const source =
+						statement.source && resolveSource(statement.source.value, filename);
+					return source ? { namespace: source } : { unknown: key };
+				}
 				if (!t.isExportSpecifier(specifier) || specifier.exportKind === 'type') continue;
 				const exported = t.isIdentifier(specifier.exported)
 					? specifier.exported.name
 					: specifier.exported.value;
 				if (exported !== name) continue;
 				if (!statement.source)
-					return resolveBinding(module.scope.getBinding(specifier.local.name), visited);
+					return (
+						resolveValue(module.scope.getBinding(specifier.local.name), visited) ?? {
+							unknown: key,
+						}
+					);
 				const source = resolveSource(statement.source.value, filename);
-				return source ? exportedFunction(source, specifier.local.name, visited) : undefined;
+				return source
+					? exportedValue(source, specifier.local.name, visited)
+					: { unknown: key };
 			}
 		}
+	}
+	// Explicit exports take precedence regardless of their position in the module.
+	let starExport: ResolvedValue | undefined;
+	for (const statement of module.node.body) {
 		if (
 			t.isExportAllDeclaration(statement) &&
 			statement.exportKind !== 'type' &&
 			name !== 'default'
 		) {
 			const source = resolveSource(statement.source.value, filename);
-			const candidate = source && exportedFunction(source, name, new Set(visited));
+			const candidate = source
+				? exportedValue(source, name, new Set(visited))
+				: { unknown: JSON.stringify([filename, statement.source.value, name]) };
 			if (candidate) {
-				if (starExport && starExport.key !== candidate.key) return;
+				if (starExport && valueKey(starExport) !== valueKey(candidate))
+					return { unknown: key };
 				starExport = candidate;
 			}
 		}
@@ -163,10 +225,10 @@ function exportedFunction(
 	return starExport;
 }
 
-export function resolveBinding(
+function resolveValue(
 	binding: Binding | undefined,
 	visited = new Set<string>()
-): InlinableFunction | undefined {
+): ResolvedValue | undefined {
 	if (!binding || !binding.constant) return;
 	const node = functionNode(binding);
 	if (node) {
@@ -179,11 +241,16 @@ export function resolveBinding(
 			filename &&
 			binding.scope.path.isProgram() &&
 			modules.get(filename)?.scope.getBinding(binding.identifier.name);
-		if (original && original !== binding) return resolveBinding(original, visited);
+		if (original && original !== binding) return resolveValue(original, visited);
 		return;
 	}
 	const specifier = binding.path;
-	if (!specifier.isImportSpecifier() && !specifier.isImportDefaultSpecifier()) return;
+	if (
+		!specifier.isImportSpecifier() &&
+		!specifier.isImportDefaultSpecifier() &&
+		!specifier.isImportNamespaceSpecifier()
+	)
+		return;
 	const declaration = specifier.parentPath;
 	if (!declaration.isImportDeclaration() || declaration.node.importKind === 'type') return;
 	if (specifier.isImportSpecifier() && specifier.node.importKind === 'type') return;
@@ -192,12 +259,39 @@ export function resolveBinding(
 		binding.scope.getProgramParent().path.node.loc?.filename || declaration.node.loc?.filename;
 	const source = filename && resolveSource(declaration.node.source.value, filename);
 	if (!source) return;
+	if (specifier.isImportNamespaceSpecifier()) return { namespace: source };
 	const imported = specifier.isImportDefaultSpecifier()
 		? 'default'
 		: t.isIdentifier(specifier.node.imported)
 			? specifier.node.imported.name
 			: specifier.node.imported.value;
-	return exportedFunction(source, imported, visited);
+	return exportedValue(source, imported, visited);
+}
+
+export function resolveBinding(binding: Binding | undefined, visited = new Set<string>()) {
+	const value = resolveValue(binding, visited);
+	return value && 'func' in value ? value : undefined;
+}
+
+/** Resolve static namespace members by binding, never by a variable's spelling. */
+export function resolveCall(call: NodePath<t.CallExpression>): InlinableFunction | undefined {
+	const members: string[] = [];
+	let callee = call.node.callee;
+	while (t.isMemberExpression(callee)) {
+		if (!callee.computed && t.isIdentifier(callee.property))
+			members.unshift(callee.property.name);
+		else if (callee.computed && t.isStringLiteral(callee.property))
+			members.unshift(callee.property.value);
+		else return;
+		callee = callee.object;
+	}
+	if (!t.isIdentifier(callee)) return;
+	let value = resolveValue(call.scope.getBinding(callee.name));
+	for (const member of members) {
+		if (!value || !('namespace' in value)) return;
+		value = exportedValue(value.namespace, member, new Set());
+	}
+	return value && 'func' in value ? value : undefined;
 }
 
 export function exportedBindingName(binding: Binding): string | undefined {
@@ -277,6 +371,7 @@ export function exportedConstant(
 }
 
 export function resetMetadata() {
+	clearResolutions();
 	allFunctions.clear();
 	inlinableFunctions.clear();
 	pureFunctions.clear();
