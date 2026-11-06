@@ -116,13 +116,15 @@ describe('inline budget', () => {
 				out[2] = input[2] * 2;
 			}
 			export function run() {
-				/* @scalar */ const scratch = [0, 0, 0];
+				const scratch = [0, 0, 0];
 				scale(scratch, [1, 2, 3]);
 				return scratch[0] + scratch[1] + scratch[2];
 			}`;
 		const scalar = await bundle({ 'main.js': source }, { budget: { max: 60 } });
 		const arrays = await bundle(
-			{ 'main.js': source.replace('@scalar', '') },
+			{
+				'main.js': `function scratchArray() { return [0, 0, 0]; }\n${source.replace('const scratch = [0, 0, 0]', 'const scratch = scratchArray()')}`,
+			},
 			{ budget: { max: 60 } }
 		);
 		expect(scalar.code.slice(scalar.code.indexOf('function run('))).not.toContain('scale(');

@@ -470,7 +470,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 			},
 		},
 	});
-	const optimized = new Set([...transformed.keys(), ...scalarReplace(ast)]);
+	const optimized = new Set([...transformed.keys(), ...scalarReplace(ast, transformed.keys())]);
 	dedupVariables(optimized);
 	eliminateWrites(optimized);
 	const cold = new Set<NodePath<t.Function>>(optimized);

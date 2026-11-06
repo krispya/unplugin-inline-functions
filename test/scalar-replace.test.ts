@@ -15,9 +15,11 @@ function execute(source: string) {
 	return structuredClone(vm.runInNewContext(`${source}\nrun()`, {}, { timeout: 1000 }));
 }
 
-describe('@scalar scratch tuples', () => {
-	it('removes scratch storage after inlining a numeric chain inside a loop', () => {
-		const source = `
+describe('scalar scratch tuples', () => {
+	it.each(['', '/* @scalar */'])(
+		'removes scratch storage after inlining a numeric chain (%s)',
+		(annotation) => {
+			const source = `
 			/* @inline */ function scale(out, a, factor) {
 				out[0] = a[0] * factor;
 				out[1] = a[1] * factor;
@@ -31,7 +33,7 @@ describe('@scalar scratch tuples', () => {
 				return out;
 			}
 			function run() {
-				/* @scalar */ const scratch = [0, 0, 0];
+				${annotation} const scratch = [0, 0, 0];
 				const input = [1.1, -2.2, 3.3], output = new Float32Array(3);
 				for (let i = 0; i < 5; i++) {
 					scale(scratch, input, i / 3);
@@ -40,12 +42,13 @@ describe('@scalar scratch tuples', () => {
 				}
 				return Array.from(output);
 			}`;
-		const code = compile(source);
-		const caller = code.slice(code.indexOf('function run('));
-		expect(caller).not.toMatch(/\bscratch\b/);
-		expect(caller).not.toContain('[0, 0, 0]');
-		expect(execute(code)).toEqual(execute(source));
-	});
+			const code = compile(source);
+			const caller = code.slice(code.indexOf('function run('));
+			expect(caller).not.toMatch(/\bscratch\b/);
+			expect(caller).not.toContain('[0, 0, 0]');
+			expect(execute(code)).toEqual(execute(source));
+		}
+	);
 
 	it('preserves component state across branches, updates and loop iterations', () => {
 		const source = `function run() {
@@ -63,13 +66,33 @@ describe('@scalar scratch tuples', () => {
 		expect(execute(code)).toEqual(execute(source));
 	});
 
-	it('leaves unannotated arrays unchanged', () => {
+	it('leaves unannotated arrays outside functions changed by inlining unchanged', () => {
 		const code = compile(
 			'function run() { const scratch = [0]; scratch[0] = 2; return scratch[0]; }'
 		);
 		expect(code).toContain('scratch[0]');
 		expect(execute(code)).toBe(2);
 	});
+
+	it.each([
+		[16, '', true],
+		[17, '', false],
+		[17, '/* @scalar */', true],
+	] as const)(
+		'limits automatic replacement to small tuples (%i components, %s)',
+		(size, annotation, replaced) => {
+			const source = `
+			/* @inline */ function value() { return 7; }
+			function run() {
+				${annotation} const scratch = [${Array(size).fill(0).join(', ')}];
+				scratch[${size - 1}] = value();
+				return scratch[${size - 1}];
+			}`;
+			const code = compile(source);
+			expect(code.includes('const scratch =')).toBe(!replaced);
+			expect(execute(code)).toBe(7);
+		}
+	);
 
 	it('retains an early reference error before assignment side effects', () => {
 		const source = `function run() {
@@ -101,10 +124,14 @@ describe('@scalar scratch tuples', () => {
 		['function name inference', 'scratch[0] = () => 1; return scratch[0].name;'],
 		['destructuring target', '[scratch[0] = () => 1] = []; return scratch[0].name;'],
 	])('retains storage for %s', (_name, body) => {
-		const source = `function run() { /* @scalar */ const scratch = [0, 2]; ${body} }`;
-		const code = compile(source);
-		expect(code).toContain('const scratch = [0, 2]');
-		expect(execute(code)).toEqual(execute(source));
+		for (const annotation of ['', '/* @scalar */']) {
+			const source = `/* @inline */ function tick() {} function run() {
+				tick(); ${annotation} const scratch = [0, 2]; ${body}
+			}`;
+			const code = compile(source);
+			expect(code).toContain('const scratch = [0, 2]');
+			expect(execute(code)).toEqual(execute(source));
+		}
 	});
 
 	it('retains typed arrays and their intermediate rounding', () => {

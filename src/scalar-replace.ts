@@ -4,7 +4,8 @@ import * as t from '@babel/types';
 import { getBabelDefaultExport } from './utils/babel-exports';
 
 /** Replace private fixed-size scratch arrays without changing evaluation order. */
-export function scalarReplace(ast: ParseResult<t.File>) {
+export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePath<t.Function>>) {
+	const automatic = new Set([...inlined].map((path) => path.node));
 	const changed = new Set<NodePath<t.Function>>();
 	const dynamic = new Map<t.Function, boolean>();
 	getBabelDefaultExport(_traverse)(ast, {
@@ -15,9 +16,6 @@ export function scalarReplace(ast: ParseResult<t.File>) {
 			if (
 				path.node.kind !== 'const' ||
 				path.node.declarations.length !== 1 ||
-				!path.node.leadingComments?.some((comment) =>
-					/(?:^|\s)@scalar\b/.test(comment.value)
-				) ||
 				!path.parentPath.isBlockStatement()
 			)
 				return;
@@ -26,6 +24,11 @@ export function scalarReplace(ast: ParseResult<t.File>) {
 			const declaration = path.get('declarations')[0];
 			const { id, init } = declaration.node;
 			if (!t.isIdentifier(id) || !t.isArrayExpression(init) || !init.elements.length) return;
+			const explicit = path.node.leadingComments?.some((comment) =>
+				/(?:^|\s)@scalar\b/.test(comment.value)
+			);
+			// Automatic replacement targets small vectors and matrices in expanded callers.
+			if (!explicit && (!automatic.has(owner.node) || init.elements.length > 16)) return;
 			if (
 				!init.elements.every(
 					(element) =>
