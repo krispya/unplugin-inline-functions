@@ -2,7 +2,7 @@ import _generate from '@babel/generator';
 import { ParseResult } from '@babel/parser';
 import _traverse, { NodePath, Scope } from '@babel/traverse';
 import * as t from '@babel/types';
-import { InlinableFunction, resolveBinding } from './collect-metadata';
+import { InlinableFunction, resolveCall } from './collect-metadata';
 import { dedupVariables } from './dedup-variables';
 import { eliminateWrites } from './eliminate-writes';
 import { STATS } from './stats';
@@ -35,7 +35,8 @@ function precedes(before: t.SourceLocation, after: t.SourceLocation) {
 /** A callee binding that is initialized whenever this call runs, so expansion cannot hide a failure. */
 function calleeInitialized(call: NodePath<t.CallExpression>, fn: InlinableFunction) {
 	if (t.isFunctionDeclaration(fn.func)) return true;
-	const binding = call.scope.getBinding((call.node.callee as t.Identifier).name);
+	if (!t.isIdentifier(call.node.callee)) return false;
+	const binding = call.scope.getBinding(call.node.callee.name);
 	if (!binding) return false;
 	if (binding.kind === 'module' || binding.kind === 'hoisted') return true;
 	const declaration = binding.path.node.loc;
@@ -62,8 +63,7 @@ function expandsFlat(
 			path.stop();
 		},
 		CallExpression(path) {
-			if (!t.isIdentifier(path.node.callee)) return;
-			const nested = resolveBinding(path.scope.getBinding(path.node.callee.name));
+			const nested = resolveCall(path);
 			if (nested?.inline && !expandsFlat(nested, flatExpansions, visited)) {
 				flat = false;
 				path.stop();
@@ -137,9 +137,8 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 		});
 	}
 	function inlinable(call: NodePath<t.CallExpression>) {
-		if (!t.isIdentifier(call.node.callee)) return false;
 		if (hasInlineDecorator(call.node)) return true;
-		return Boolean(resolveBinding(call.scope.getBinding(call.node.callee.name))?.inline);
+		return Boolean(resolveCall(call)?.inline);
 	}
 	// Expansions need a statement to precede. Give concise arrows that expand a call a block body.
 	traverse(ast, {
@@ -159,8 +158,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 	traverse(ast, {
 		CallExpression: {
 			exit(path) {
-				if (!t.isIdentifier(path.node.callee)) return;
-				const fn = resolveBinding(path.scope.getBinding(path.node.callee.name));
+				const fn = resolveCall(path);
 				if (!fn) return;
 				if (
 					fn.pure &&

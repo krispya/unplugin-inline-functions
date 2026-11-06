@@ -263,6 +263,12 @@ function displayUserInfo(userId) {
 - Works with arrow functions and regular function declarations
 - Maintains correct variable scoping and execution order
 
+Namespace calls such as `vec3.scale(...)` and `vec3["scale"](...)` also resolve through ES module imports. This includes `import * as vec3`, aliased imports of `export * as vec3`, and nested namespaces or barrels. The target function still needs an `@inline` hint on its declaration or call site.
+
+Namespace expansion currently requires an exported function declaration. Function-valued variables remain calls so initialization errors are preserved. Dynamic keys, optional calls, ordinary objects, shadowed bindings, mutable exports, ambiguous exports and functions that depend on `this` are not expanded.
+
+Module paths and completed export lookups, including misses, are cached. Repeated calls reuse these results instead of repeating filesystem resolution and barrel traversal. Collecting or resetting metadata, or replacing resolver configuration, clears the caches. Partial traversals through export cycles are never cached.
+
 ## Read reuse and `@pure`
 
 After inlining, the plugin can reuse repeated reads of known own data properties of fresh local object literals. Reads stay in their original block; the plugin does not hoist them out of branches or loops.
