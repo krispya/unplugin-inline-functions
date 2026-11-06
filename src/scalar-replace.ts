@@ -9,6 +9,7 @@ function unwrap(expression: t.Expression): t.Expression {
 		t.isTSTypeAssertion(expression) ||
 		t.isTSNonNullExpression(expression) ||
 		t.isTSSatisfiesExpression(expression) ||
+		t.isTSInstantiationExpression(expression) ||
 		t.isParenthesizedExpression(expression)
 	)
 		expression = expression.expression;
@@ -94,6 +95,7 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 					access.parentPath?.isTSTypeAssertion() ||
 					access.parentPath?.isTSNonNullExpression() ||
 					access.parentPath?.isTSSatisfiesExpression() ||
+					access.parentPath?.isTSInstantiationExpression() ||
 					access.parentPath?.isParenthesizedExpression()
 				)
 					access = access.parentPath;

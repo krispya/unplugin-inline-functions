@@ -85,6 +85,17 @@ describe('scalar scratch tuples', () => {
 		expect(execute(transformSync(code, { loader: 'ts' }).code)).toBe(3);
 	});
 
+	it('retains the receiver through a TypeScript instantiation expression', () => {
+		const source = `function run() {
+			/* @scalar */ const scratch = [0, 7];
+			function read<T>() { return this[1]; }
+			scratch[0] = read;
+			return (scratch[0]<number>)();
+		}`;
+		const code = compile(source);
+		expect(execute(transformSync(code, { loader: 'ts' }).code)).toBe(7);
+	});
+
 	it('leaves unannotated arrays outside functions changed by inlining unchanged', () => {
 		const code = compile(
 			'function run() { const scratch = [0]; scratch[0] = 2; return scratch[0]; }'
