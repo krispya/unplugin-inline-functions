@@ -3,6 +3,10 @@ import _traverse, { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import { getBabelDefaultExport } from './utils/babel-exports';
 
+function annotated(path: NodePath<t.VariableDeclaration>) {
+	return path.node.leadingComments?.some((comment) => /(?:^|\s)@scalar\b/.test(comment.value));
+}
+
 function unwrap(expression: t.Expression): t.Expression {
 	while (
 		t.isTSAsExpression(expression) ||
@@ -16,11 +20,56 @@ function unwrap(expression: t.Expression): t.Expression {
 	return expression;
 }
 
+function tupleInitializer(expression: t.Expression | null | undefined) {
+	if (!expression) return;
+	let init = unwrap(expression);
+	const prefix: t.Expression[] = [];
+	while (t.isSequenceExpression(init)) {
+		prefix.push(...init.expressions.slice(0, -1));
+		init = unwrap(init.expressions[init.expressions.length - 1]);
+	}
+	if (t.isArrayExpression(init) && init.elements.length && init.elements.every(t.isExpression))
+		return { init, prefix };
+}
+
+function effectStatement(expression: t.Expression) {
+	// Strings evaluated as array elements or sequence operands are not directives.
+	return t.expressionStatement(
+		t.isStringLiteral(unwrap(expression))
+			? t.sequenceExpression([t.numericLiteral(0), expression])
+			: expression
+	);
+}
+
 /** Replace private fixed-size scratch arrays without changing evaluation order. */
 export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePath<t.Function>>) {
 	const automatic = new Set([...inlined].map((path) => path.node));
 	const changed = new Set<NodePath<t.Function>>();
 	const dynamic = new Map<t.Function, boolean>();
+	getBabelDefaultExport(_traverse)(ast, {
+		VariableDeclaration(path) {
+			const owner = path.getFunctionParent();
+			if (
+				!owner ||
+				path.node.kind !== 'const' ||
+				path.node.declarations.length < 2 ||
+				!path.parentPath.isBlockStatement() ||
+				(!automatic.has(owner.node) && !annotated(path)) ||
+				!path.node.declarations.some(
+					({ id, init }) => t.isIdentifier(id) && tupleInitializer(init)
+				)
+			)
+				return;
+			// Separate declarations retain their order and the block's lexical bindings.
+			path.replaceWithMultiple(
+				path.node.declarations.map((declaration) => {
+					const statement = t.cloneNode(path.node);
+					statement.declarations = [declaration];
+					return statement;
+				})
+			);
+		},
+	});
 	getBabelDefaultExport(_traverse)(ast, {
 		Program(path) {
 			path.scope.crawl();
@@ -35,23 +84,14 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 			const owner = path.getFunctionParent();
 			if (!owner) return;
 			const declaration = path.get('declarations')[0];
-			const { id, init } = declaration.node;
-			if (!t.isIdentifier(id) || !t.isArrayExpression(init) || !init.elements.length) return;
-			const explicit = path.node.leadingComments?.some((comment) =>
-				/(?:^|\s)@scalar\b/.test(comment.value)
-			);
+			const { id } = declaration.node;
+			if (!t.isIdentifier(id) || !declaration.node.init) return;
+			const tuple = tupleInitializer(declaration.node.init);
+			if (!tuple) return;
+			const { init, prefix } = tuple;
+			const explicit = annotated(path);
 			// Automatic replacement targets small vectors and matrices in expanded callers.
 			if (!explicit && (!automatic.has(owner.node) || init.elements.length > 16)) return;
-			if (
-				!init.elements.every(
-					(element) =>
-						t.isNumericLiteral(element) ||
-						(t.isUnaryExpression(element) &&
-							['+', '-'].includes(element.operator) &&
-							t.isNumericLiteral(element.argument))
-				)
-			)
-				return;
 			const binding = declaration.scope.getBinding(id.name);
 			if (!binding?.constant) return;
 			if (!dynamic.has(owner.node)) {
@@ -124,19 +164,26 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 			}
 			for (const access of accesses)
 				access.path.replaceWith(t.cloneNode(components.get(access.index)!));
-			if (components.size) {
-				path.replaceWith(
-					t.variableDeclaration(
-						'let',
-						[...components].map(([index, component]) =>
-							t.variableDeclarator(
-								component,
-								t.cloneNode(init.elements[index] as t.Expression)
-							)
-						)
-					)
-				);
-			} else {
+			const statements: t.Statement[] = prefix.map((expression) =>
+				effectStatement(t.cloneNode(expression, true))
+			);
+			// Evaluate every initializer in array order, even when its component is unused.
+			for (let index = 0; index < init.elements.length; index++) {
+				let element = t.cloneNode(init.elements[index] as t.Expression, true);
+				const component = components.get(index);
+				if (component) {
+					// Array elements do not infer names for anonymous functions or classes.
+					if (t.isFunction(unwrap(element)) || t.isClass(unwrap(element)))
+						element = t.sequenceExpression([t.numericLiteral(0), element]);
+					statements.push(
+						t.variableDeclaration('let', [t.variableDeclarator(component, element)])
+					);
+				} else if (!t.isNumericLiteral(element)) {
+					statements.push(effectStatement(element));
+				}
+			}
+			if (statements.length) path.replaceWithMultiple(statements);
+			else {
 				// Keep following string expressions outside the directive prologue.
 				path.replaceWith(t.emptyStatement());
 			}
