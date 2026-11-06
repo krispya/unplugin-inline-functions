@@ -126,3 +126,24 @@ it('leaves ambiguous exports and receiver-dependent or uninitialized functions a
 		fixture.dispose();
 	}
 });
+
+it('gives explicit exports precedence over conflicting star exports in any order', () => {
+	const fixture = project();
+	try {
+		fixture.module('first.js', 'export /* @inline */ function value() { return 1; }');
+		fixture.module('second.js', 'export /* @inline */ function value() { return 2; }');
+		fixture.module(
+			'index.js',
+			"export * from './first.js'; export * from './second.js'; export {value} from './second.js';"
+		);
+		const ast = fixture.module(
+			'main.js',
+			"import * as ns from './index.js'; export function run() { return ns.value(); }"
+		);
+		const code = inlineFunctions(ast);
+		expect(code).not.toContain('ns.value(');
+		expect(code).toContain('return 2');
+	} finally {
+		fixture.dispose();
+	}
+});

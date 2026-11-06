@@ -158,7 +158,6 @@ function findExportedValue(
 	visited.add(key);
 	const module = modules.get(filename);
 	if (!module) return { unknown: key };
-	let starExport: ResolvedValue | undefined;
 	for (const statement of module.node.body) {
 		if (t.isExportDefaultDeclaration(statement) && name === 'default') {
 			if (t.isIdentifier(statement.declaration))
@@ -203,6 +202,10 @@ function findExportedValue(
 					: { unknown: key };
 			}
 		}
+	}
+	// Explicit exports take precedence regardless of their position in the module.
+	let starExport: ResolvedValue | undefined;
+	for (const statement of module.node.body) {
 		if (
 			t.isExportAllDeclaration(statement) &&
 			statement.exportKind !== 'type' &&
