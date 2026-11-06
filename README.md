@@ -311,6 +311,33 @@ object.x = 2;
 
 Candidates are standalone `=` assignments to initialized local `let`/`var` bindings or proven writable own data properties. Overwritten local initializers can also be removed while retaining the declaration. Both the target evaluation and discarded RHS must have no observable effects. Reads of the old value, unknown operations, calls, suspension, and control-flow boundaries retain preceding stores. Getters, setters, proxies, inherited properties, dynamic keys, arrays, shared memory, updates, compound/logical assignments, and assignments used as values are excluded.
 
+## Scalar scratch tuples
+
+After inlining changes a function, the plugin automatically replaces eligible local numeric tuples of up to 16 components with scalar locals:
+
+```js
+/* @inline */ function scale(out, a, factor) {
+	out[0] = a[0] * factor;
+	out[1] = a[1] * factor;
+	out[2] = a[2] * factor;
+	return out;
+}
+
+function update(out, input, speed) {
+	const scratch = [0, 0, 0];
+	scale(scratch, input, 2);
+	scale(out, scratch, speed);
+}
+```
+
+The generated function carries the scratch components in local variables. It eliminates the scratch allocation, component stores and component loads, while retaining writes to `out`. Arithmetic stays in its original order. The pass runs before the bytecode budget is measured, so the budget sees the cleaned result.
+
+Use `/* @scalar */ const scratch = [0, 0, 0]` to request replacement in a function without inlining, or for a larger tuple. The annotation uses the same correctness checks. It does not force an unsafe transformation. The automatic size limit keeps the default focused on small vectors and matrices.
+
+The first version supports a single `const` binding initialized with a nonempty array of numeric literals, including signed literals. Every use after inlining must be a fixed, in-bounds numeric index in the same function. Branches and loops retain their original control flow. If a call remains uninlined, the array escapes, an alias or closure captures it, or an access uses a dynamic index, deletion, destructuring target or a method receiver, the entire tuple stays unchanged. Assignments containing function or class definitions are retained to preserve name inference. Functions containing direct `eval` or `with` are also excluded.
+
+Caller-owned scratch arrays, typed arrays, sparse arrays and effectful initializers are not supported. Use a fresh local tuple when its identity and final contents do not need to leave the function. If optimization is skipped, that local allocation remains. Unannotated arrays outside functions changed by inlining are unaffected.
+
 ## Inverted control flow
 
 By marking a function with an `@inline` hint, it is inlined for **all** calls, however you might want to inline selectively. This can be done by instead adding the hint to the function call.

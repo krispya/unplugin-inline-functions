@@ -108,6 +108,31 @@ describe('measurement cache', () => {
 });
 
 describe('inline budget', () => {
+	it('measures scalar cleanup before deciding whether to retain a call', async () => {
+		const source = `
+			/* @inline */ function scale(out, input) {
+				out[0] = input[0] * 2;
+				out[1] = input[1] * 2;
+				out[2] = input[2] * 2;
+			}
+			export function run() {
+				const scratch = [0, 0, 0];
+				scale(scratch, [1, 2, 3]);
+				return scratch[0] + scratch[1] + scratch[2];
+			}`;
+		const scalar = await bundle({ 'main.js': source }, { budget: { max: 60 } });
+		const arrays = await bundle(
+			{
+				'main.js': `function scratchArray() { return [0, 0, 0]; }\n${source.replace('const scratch = [0, 0, 0]', 'const scratch = scratchArray()')}`,
+			},
+			{ budget: { max: 60 } }
+		);
+		expect(scalar.code.slice(scalar.code.indexOf('function run('))).not.toContain('scale(');
+		expect(arrays.code.slice(arrays.code.indexOf('function run('))).toContain('scale(');
+		expect(scalar.value).toBe(12);
+		expect(arrays.value).toBe(scalar.value);
+	});
+
 	it('keeps a function within budget by leaving its largest expansion as a call', async () => {
 		const result = await bundle(files, { budget: { max: 60 } });
 		const caller = result.code.slice(result.code.indexOf('function run('));
