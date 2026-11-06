@@ -334,9 +334,21 @@ The generated function carries the scratch components in local variables. It eli
 
 Use `/* @scalar */ const scratch = [0, 0, 0]` to request replacement in a function without inlining, or for a larger tuple. The annotation uses the same correctness checks. It does not force an unsafe transformation. The automatic size limit keeps the default focused on small vectors and matrices.
 
-The first version supports a single `const` binding initialized with a nonempty array of numeric literals, including signed literals. Every use after inlining must be a fixed, in-bounds numeric index in the same function. Branches and loops retain their original control flow. If a call remains uninlined, the array escapes, an alias or closure captures it, or an access uses a dynamic index, deletion, destructuring target or a method receiver, the entire tuple stays unchanged. Assignments containing function or class definitions are retained to preserve name inference. Functions containing direct `eval` or `with` are also excluded.
+Factories selected for inlining can supply the tuple too. This supports math-style `create`, `fromValues` and `clone` helpers, including several declarations in one statement:
 
-Caller-owned scratch arrays, typed arrays, sparse arrays and effectful initializers are not supported. Use a fresh local tuple when its identity and final contents do not need to leave the function. If optimization is skipped, that local allocation remains. Unannotated arrays outside functions changed by inlining are unaffected.
+```js
+function update(out, x, y, z, speed) {
+	const scratch = fromValues(x, y, z),
+		copy = clone(scratch);
+	scale(out, copy, speed);
+}
+```
+
+The factory must expand to a fresh, nonempty array literal. Its name is not special, and a remaining factory call does not qualify. Initializer expressions, including cloned component reads, execute once in their original order even when the component is unused. Surplus argument effects, throwing getters and anonymous function or class names are preserved. TypeScript assertions and leading sequence expressions around the array are supported. This does not change which functions are selected for inlining.
+
+Every use after inlining must be a fixed, in-bounds numeric index in the same function. Branches and loops retain their original control flow. If the array escapes, an alias or closure captures it, a remaining call receives it, or an access uses a dynamic index, deletion, destructuring target or a method receiver, the entire tuple stays unchanged. Assignments containing function or class definitions are retained to preserve name inference. Functions containing direct `eval` or `with` are also excluded.
+
+Caller-owned scratch arrays, typed arrays, sparse arrays and array spreads are not supported. Use a fresh local tuple when its identity and final contents do not need to leave the function. If optimization is skipped, that local allocation remains. Unannotated arrays outside functions changed by inlining are unaffected.
 
 ## Inverted control flow
 

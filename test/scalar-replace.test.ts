@@ -17,6 +17,103 @@ function execute(source: string) {
 }
 
 describe('scalar scratch tuples', () => {
+	it('scalarizes create, fromValues and clone results in one declaration', () => {
+		const source = `
+			/* @inline */ function create() { return [0, 0, 0]; }
+			/* @inline */ function fromValues(x, y, z) { return [x, y, z]; }
+			/* @inline */ function clone(a) { return [a[0], a[1], a[2]]; }
+			function run() {
+				const seed = 3;
+				const empty = create(), values = fromValues(seed, seed + 1, seed + 2), copy = clone(values);
+				empty[0] = copy[0] * 2;
+				copy[1] += values[2];
+				return [empty[0], copy[1], copy[2]];
+			}`;
+		const code = compile(source);
+		expect(code.slice(code.indexOf('function run('))).not.toMatch(/\b(empty|values|copy)\b/);
+		expect(execute(code)).toEqual([6, 9, 5]);
+		expect(execute(code)).toEqual(execute(source));
+	});
+
+	it('evaluates factory arguments and unused components once in their original order', () => {
+		const source = `
+			/* @inline */ function fromValues(x, y, z) { return [x, y, z]; }
+			function run() {
+				const log = []; function next(value) { log.push(value); return log.length; }
+				const scratch = fromValues(next('x'), next('y'), next('z'));
+				return [scratch[2], scratch[0], log];
+			}`;
+		const code = compile(source);
+		expect(code.slice(code.indexOf('function run('))).not.toContain('scratch[');
+		expect(execute(code)).toEqual([3, 1, ['x', 'y', 'z']]);
+		expect(execute(code)).toEqual(execute(source));
+	});
+
+	it('preserves throwing reads of unused cloned components', () => {
+		const source = `
+			/* @inline */ function clone(a) { return [a[0], a[1], a[2]]; }
+			function run() {
+				const log = [];
+				const input = {get 0() { log.push(0); return 1; }, get 1() { log.push(1); throw 2; }, get 2() { log.push(2); return 3; }};
+				try { const scratch = clone(input); return scratch[0]; }
+				catch (error) { return [log, error]; }
+			}`;
+		const code = compile(source);
+		expect(code.slice(code.indexOf('function run('))).not.toContain('scratch[');
+		expect(execute(code)).toEqual([[0, 1], 2]);
+		expect(execute(code)).toEqual(execute(source));
+	});
+
+	it('preserves surplus argument effects before a fresh tuple initializer', () => {
+		const source = `
+			/* @inline */ function create() { return [0, 0]; }
+			function run() {
+				const log = [];
+				const scratch = create(log.push('argument'));
+				scratch[0] = 3;
+				return [scratch[0], log];
+			}`;
+		const code = compile(source);
+		expect(code.slice(code.indexOf('function run('))).not.toContain('scratch[');
+		expect(execute(code)).toEqual([3, ['argument']]);
+		expect(execute(code)).toEqual(execute(source));
+	});
+
+	it('recognizes TypeScript tuple assertions around an inlined factory', () => {
+		const source = `/* @inline */ function fromValues(x, y) { return [x, y]; }
+			function run() { const scratch = fromValues(2, 3) as [number, number]; return scratch[0] + scratch[1]; }`;
+		const code = compile(source);
+		expect(code.slice(code.indexOf('function run('))).not.toContain('scratch[');
+		expect(execute(code)).toBe(5);
+	});
+
+	it('keeps anonymous function and class initializer names unchanged', () => {
+		const source = `function run() {
+			const log = [];
+			/* @scalar */ const scratch = [function() {}, class { static { log.push(this.name); } }];
+			return [scratch[0].name, scratch[1].name, log];
+		}`;
+		const code = compile(source);
+		expect(code).not.toContain('scratch[');
+		expect(execute(code)).toEqual(['', '', ['']]);
+		expect(execute(code)).toEqual(execute(source));
+	});
+
+	it('keeps remaining factory calls and returned shared storage intact', () => {
+		const source = `const shared = [1, 2]; function create() { return shared; }
+			function run() { /* @scalar */ const scratch = create(); scratch[0] = 4; return [scratch === shared, shared[0]]; }`;
+		const code = compile(source);
+		expect(code).toContain('const scratch = create()');
+		expect(execute(code)).toEqual([true, 4]);
+	});
+
+	it.each(['[1, , 3]', '[...[1, 2, 3]]'])('retains unsupported initializer %s', (initializer) => {
+		const source = `function run() { /* @scalar */ const scratch = ${initializer}; return scratch[0]; }`;
+		const code = compile(source);
+		expect(code).toContain('scratch[0]');
+		expect(execute(code)).toEqual(execute(source));
+	});
+
 	it.each(['', '/* @scalar */'])(
 		'removes scratch storage after inlining a numeric chain (%s)',
 		(annotation) => {
