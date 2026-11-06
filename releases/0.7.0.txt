@@ -1,0 +1,58 @@
+unplugin-inline-functions 0.7.0
+
+Highlights
+
+- Automatically replace private scratch tuples with scalar locals in functions
+  changed by inlining. Automatic replacement covers up to 16 components.
+- Support fresh tuple results from inlined factories, including math-style
+  create, fromValues and clone helpers and grouped declarations.
+- Resolve static ES module namespace calls through aliases, nested namespaces
+  and re-exports. Cache module and export resolution, including misses.
+
+Behavior and compatibility
+
+These optimizations are enabled by default. Existing @inline selection and
+bytecode budgets are unchanged. A factory must actually inline to a fresh
+array literal before its result qualifies for scalar replacement.
+
+Use /* @scalar */ on a const tuple declaration to request replacement outside
+functions changed by inlining or for larger tuples. The same correctness
+checks apply. Every use must be a fixed, in-bounds component access, with no
+observable tuple identity. Shared storage, escaping tuples, typed arrays and
+unsupported accesses retain their original representation.
+
+Initializer effects and throwing reads retain their order, including unused
+components. Direct eval, directive prologues, method receivers and anonymous
+function or class names retain their semantics through TypeScript wrappers.
+
+Namespace resolution follows lexical bindings. Dynamic keys, ambiguous or
+mutable exports and receiver-dependent functions remain calls. Resolution
+caches are invalidated when metadata or resolver configuration changes.
+
+The minimum Node version remains 22.13. The package manager remains pnpm
+12.16.1, with a declared pnpm engine of >=12.0.0. Dependencies are unchanged.
+
+Validation
+
+- 299 plugin tests, type checking and the ESM/CommonJS declaration build pass.
+- A separate consumer with production dependencies installed from the packed
+  tarball passes all 12 ESM/CommonJS entrypoint checks and verifies every
+  export target. Its namespace, factory and scalar chain compiles and executes
+  correctly under the default bytecode budget.
+- Koota at dadb1d1d plus the tracked working changes present during review
+  passes all 467 generated core/React/Svelte tests with each feature branch
+  independently and with all three combined. All 27 distribution files match
+  the baseline byte-for-byte. This establishes compatibility, not a Koota
+  core speedup. Runtime-generated accessors remain outside static analysis.
+
+Manual release
+
+After checking out the prepared release commit on main, run:
+
+  pnpm run release
+
+This command rebuilds and publishes to npm and may request browser
+authentication. Publication has not been performed during preparation.
+
+If creating a GitHub release, use tag v0.7.0 at the release preparation commit.
+No release tag or GitHub release has been created during preparation.
