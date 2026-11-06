@@ -5,6 +5,7 @@ import * as t from '@babel/types';
 import { InlinableFunction, resolveBinding } from './collect-metadata';
 import { dedupVariables } from './dedup-variables';
 import { eliminateWrites } from './eliminate-writes';
+import { scalarReplace } from './scalar-replace';
 import { STATS } from './stats';
 import { getBabelDefaultExport } from './utils/babel-exports';
 import { enclosingStatement, hoistAnchor, insertBeforeStatement } from './utils/call-position';
@@ -469,9 +470,10 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 			},
 		},
 	});
-	dedupVariables(transformed.keys());
-	eliminateWrites(transformed.keys());
-	const cold = new Set<NodePath<t.Function>>(transformed.keys());
+	const optimized = new Set([...transformed.keys(), ...scalarReplace(ast)]);
+	dedupVariables(optimized);
+	eliminateWrites(optimized);
+	const cold = new Set<NodePath<t.Function>>(optimized);
 	traverse(ast, {
 		Function(path) {
 			if (hasColdAnnotation(path)) cold.add(path);
