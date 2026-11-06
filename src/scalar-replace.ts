@@ -20,6 +20,18 @@ function unwrap(expression: t.Expression): t.Expression {
 	return expression;
 }
 
+function tupleInitializer(expression: t.Expression | null | undefined) {
+	if (!expression) return;
+	let init = unwrap(expression);
+	const prefix: t.Expression[] = [];
+	while (t.isSequenceExpression(init)) {
+		prefix.push(...init.expressions.slice(0, -1));
+		init = unwrap(init.expressions[init.expressions.length - 1]);
+	}
+	if (t.isArrayExpression(init) && init.elements.length && init.elements.every(t.isExpression))
+		return { init, prefix };
+}
+
 function effectStatement(expression: t.Expression) {
 	// Strings evaluated as array elements or sequence operands are not directives.
 	return t.expressionStatement(
@@ -42,7 +54,10 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 				path.node.kind !== 'const' ||
 				path.node.declarations.length < 2 ||
 				!path.parentPath.isBlockStatement() ||
-				(!automatic.has(owner.node) && !annotated(path))
+				(!automatic.has(owner.node) && !annotated(path)) ||
+				!path.node.declarations.some(
+					({ id, init }) => t.isIdentifier(id) && tupleInitializer(init)
+				)
 			)
 				return;
 			// Separate declarations retain their order and the block's lexical bindings.
@@ -71,18 +86,9 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 			const declaration = path.get('declarations')[0];
 			const { id } = declaration.node;
 			if (!t.isIdentifier(id) || !declaration.node.init) return;
-			let init = unwrap(declaration.node.init);
-			const prefix: t.Expression[] = [];
-			while (t.isSequenceExpression(init)) {
-				prefix.push(...init.expressions.slice(0, -1));
-				init = unwrap(init.expressions[init.expressions.length - 1]);
-			}
-			if (
-				!t.isArrayExpression(init) ||
-				!init.elements.length ||
-				!init.elements.every(t.isExpression)
-			)
-				return;
+			const tuple = tupleInitializer(declaration.node.init);
+			if (!tuple) return;
+			const { init, prefix } = tuple;
 			const explicit = annotated(path);
 			// Automatic replacement targets small vectors and matrices in expanded callers.
 			if (!explicit && (!automatic.has(owner.node) || init.elements.length > 16)) return;
