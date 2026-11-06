@@ -20,6 +20,15 @@ function unwrap(expression: t.Expression): t.Expression {
 	return expression;
 }
 
+function effectStatement(expression: t.Expression) {
+	// Strings evaluated as array elements or sequence operands are not directives.
+	return t.expressionStatement(
+		t.isStringLiteral(unwrap(expression))
+			? t.sequenceExpression([t.numericLiteral(0), expression])
+			: expression
+	);
+}
+
 /** Replace private fixed-size scratch arrays without changing evaluation order. */
 export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePath<t.Function>>) {
 	const automatic = new Set([...inlined].map((path) => path.node));
@@ -150,7 +159,7 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 			for (const access of accesses)
 				access.path.replaceWith(t.cloneNode(components.get(access.index)!));
 			const statements: t.Statement[] = prefix.map((expression) =>
-				t.expressionStatement(t.cloneNode(expression, true))
+				effectStatement(t.cloneNode(expression, true))
 			);
 			// Evaluate every initializer in array order, even when its component is unused.
 			for (let index = 0; index < init.elements.length; index++) {
@@ -164,7 +173,7 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 						t.variableDeclaration('let', [t.variableDeclarator(component, element)])
 					);
 				} else if (!t.isNumericLiteral(element)) {
-					statements.push(t.expressionStatement(element));
+					statements.push(effectStatement(element));
 				}
 			}
 			if (statements.length) path.replaceWithMultiple(statements);

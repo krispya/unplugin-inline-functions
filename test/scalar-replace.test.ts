@@ -99,6 +99,17 @@ describe('scalar scratch tuples', () => {
 		expect(execute(code)).toEqual(execute(source));
 	});
 
+	it.each(["['use strict', 1]", "('use strict', [1])"])(
+		'does not turn initializer strings into directives: %s',
+		(initializer) => {
+			const source = `function run() {
+				/* @scalar */ const scratch = ${initializer};
+				return this === undefined;
+			}`;
+			expect(execute(compile(source))).toEqual(execute(source));
+		}
+	);
+
 	it('keeps remaining factory calls and returned shared storage intact', () => {
 		const source = `const shared = [1, 2]; function create() { return shared; }
 			function run() { /* @scalar */ const scratch = create(); scratch[0] = 4; return [scratch === shared, shared[0]]; }`;
