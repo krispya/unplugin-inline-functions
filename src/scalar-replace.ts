@@ -3,6 +3,18 @@ import _traverse, { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import { getBabelDefaultExport } from './utils/babel-exports';
 
+function unwrap(expression: t.Expression): t.Expression {
+	while (
+		t.isTSAsExpression(expression) ||
+		t.isTSTypeAssertion(expression) ||
+		t.isTSNonNullExpression(expression) ||
+		t.isTSSatisfiesExpression(expression) ||
+		t.isParenthesizedExpression(expression)
+	)
+		expression = expression.expression;
+	return expression;
+}
+
 /** Replace private fixed-size scratch arrays without changing evaluation order. */
 export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePath<t.Function>>) {
 	const automatic = new Set([...inlined].map((path) => path.node));
@@ -45,7 +57,11 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 				let found = false;
 				owner.traverse({
 					CallExpression(call) {
-						if (t.isIdentifier(call.node.callee, { name: 'eval' })) found = true;
+						if (
+							t.isExpression(call.node.callee) &&
+							t.isIdentifier(unwrap(call.node.callee), { name: 'eval' })
+						)
+							found = true;
 					},
 					WithStatement() {
 						found = true;
@@ -118,7 +134,10 @@ export function scalarReplace(ast: ParseResult<t.File>, inlined: Iterable<NodePa
 						)
 					)
 				);
-			} else path.remove();
+			} else {
+				// Keep following string expressions outside the directive prologue.
+				path.replaceWith(t.emptyStatement());
+			}
 			changed.add(owner);
 		},
 	});

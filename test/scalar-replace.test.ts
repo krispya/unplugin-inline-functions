@@ -1,11 +1,12 @@
 import { parse } from '@babel/parser';
+import { transformSync } from 'esbuild';
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { collectMetadata, resetMetadata } from '../src/collect-metadata';
 import { inlineFunctions } from '../src/inline-functions';
 
 function compile(source: string) {
-	const ast = parse(source, { sourceFilename: '/test/scalar.js' });
+	const ast = parse(source, { sourceFilename: '/test/scalar.ts', plugins: ['typescript'] });
 	resetMetadata();
 	collectMetadata(ast);
 	return inlineFunctions(ast, { outlineThrows: false });
@@ -64,6 +65,24 @@ describe('scalar scratch tuples', () => {
 		const code = compile(source);
 		expect(code).not.toMatch(/\bscratch\[/);
 		expect(execute(code)).toEqual(execute(source));
+	});
+
+	it('does not expose a directive when removing unused storage', () => {
+		const source = `function run() {
+			/* @scalar */ const scratch = [0];
+			'use strict';
+			return this === undefined;
+		}`;
+		expect(execute(compile(source))).toEqual(execute(source));
+	});
+
+	it('retains storage visible to direct eval through TypeScript wrappers', () => {
+		const source = `function run() {
+			/* @scalar */ const scratch = [3];
+			return (eval as typeof eval)('scratch[0]');
+		}`;
+		const code = compile(source);
+		expect(execute(transformSync(code, { loader: 'ts' }).code)).toBe(3);
 	});
 
 	it('leaves unannotated arrays outside functions changed by inlining unchanged', () => {
