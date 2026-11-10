@@ -434,7 +434,7 @@ function read(object) {
     return object[key]; // a constant once optimized
 }
 const key$export = key;
-export { key$export as key, read };
+export { key$export as key };
 ```
 
 Importers get the same value under the same name. Bindings that are assigned again keep their live export. This runs on ES module chunks from Rollup, Vite and Rolldown, and skips a chunk that imports another chunk, where an import cycle could read an export before the alias exists. Turn it off with `decoupleExports: false`.
