@@ -392,6 +392,422 @@ describe('call semantics', () => {
 	});
 });
 
+const any =
+	'/* @inline */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; }';
+const positive =
+	'/* @inline */ function positive(n) { if (n < 0) throw new Error("negative"); return n > 0; }';
+
+// Bodies that need statements, at positions only some paths evaluate.
+const flattenedCases: { name: string; source: string; inlined?: string }[] = [
+	{
+		name: 'a returned conditional',
+		source: `${any} function pick(c, xs) { return c ? xs.length : any(xs); } function run() { return [pick(true, [1]), pick(false, [0, 2]), pick(false, [0])]; }`,
+	},
+	{
+		name: 'returned logical operands',
+		source: `${any} function run() { const log = []; function and(a, xs) { return a && any(xs); } function or(xs) { return log.push(1) > 2 || any(xs); } function nullish(a, xs) { return a ?? any(xs); } return [and(0, [1]), and(1, [1]), or([0]), or([1]), or([0]), nullish(0, [1]), nullish(null, [1]), log]; }`,
+	},
+	{
+		name: 'unused values',
+		source: '/* @inline */ function any(out, n) { for (let i = 0; i < n; i++) out.push(i); } function run() { const out = []; const c = out.length; c && any(out, 9); c || any(out, 2); c ? any(out, 9) : 0; c ? 0 : any(out, 1); out[9] ?? any(out, 1); return out; }',
+	},
+	{
+		name: 'nested conditionals',
+		source: `${any} function pick(a, b, xs) { return a ? (b ? any(xs) : 1) : 2; } function run() { return [pick(1, 1, [1]), pick(1, 1, [0]), pick(1, 0, [1]), pick(0, 1, [1])]; }`,
+	},
+	{
+		name: 'a conditional argument between effectful operands',
+		source: `${any} function run() { const log = []; function next() { log.push(log.length); return log.length; } function list(a, b, c) { return [a, b, c]; } return [list(next(), log.length ? any([1]) : 0, next()), log]; }`,
+	},
+	{
+		name: 'declared and assigned values',
+		source: `${any} function run() { const log = []; const a = log.push(1) && any([0, 1]); let b; b = log.length > 5 ? 0 : any([0]); const c = [log.length ? any([1]) : 0]; return [a, b, c, log]; }`,
+	},
+	{
+		name: 'anonymous functions beside a flattened branch',
+		source: `${positive} function run() { const yes = [1].length; const a = yes ? () => 1 : positive(0); const b = [yes ? () => 1 : positive(0)]; return [a.name, b[0].name]; }`,
+		inlined: 'positive',
+	},
+	{
+		name: 'a while test',
+		source: '/* @inline */ function any(q) { for (const v of q) if (v > 0) return true; return false; } function run() { const q = [3, 2, 1]; const out = []; while (any(q)) { const v = q.shift(); if (v === 2) continue; out.push(v); q.push(0); if (out.length > 5) break; } return out; }',
+	},
+	{
+		name: 'a for test with fresh bindings on each pass',
+		source: '/* @inline */ function any(q, i) { for (const v of q) if (v > i) return true; return false; } function run() { const out = []; const reads = []; for (let i = 0; i < 9 && any([1, 2, 3], i); i++) { if (i === 1) continue; out.push(i); reads.push(() => i); } return [out, reads.map((read) => read())]; }',
+	},
+	{
+		name: 'an and chain in a loop test',
+		source: '/* @inline */ function any(q) { for (const v of q) if (v > 0) return true; return false; } function run() { const q = [3, 2, 1, 0]; const out = []; while (out.length < 2 && any(q) && q.length) out.push(q.shift()); return out; }',
+	},
+	{
+		name: 'if tests',
+		source: `${any} function kind(a, xs) { if (a > 5) return "big"; else if (a && any(xs)) return "any"; if (a < 0 || any(xs)) return "or"; if (a && any(xs)) { return "and"; } else return "none"; } function run() { return [kind(9, []), kind(1, [1]), kind(1, [0]), kind(0, [1]), kind(-1, [0]), kind(0, [0])]; }`,
+	},
+	{
+		name: 'switch cases, bare branches and concise arrows',
+		source: `${any} function pick(k, xs) { switch (k) { case 1: return xs.length ? any(xs) : -1; default: if (k) return k > 2 && any(xs); } return 0; } function run() { return [pick(1, [1]), pick(1, []), pick(3, [0]), pick(2, [1]), pick(0, [1]), [[1], [0], []].map((xs) => xs.length && any(xs))]; }`,
+	},
+	{
+		name: 'a branch beside await',
+		source: `${any} async function run() { const a = (await 1) ? any([1]) : await 2; const b = (await 0) || any([0]); return [a, b]; }`,
+	},
+	{
+		name: 'logical assignments to variables',
+		source: `${any} function run() { let hits = 0; function next(value) { hits++; return value; } let a = 0; let b = 5; a ||= any([next(1)]); b ??= any([next(1)]); const c = (a &&= any([next(0)])); return [a, b, c, hits]; }`,
+	},
+	{
+		name: 'logical assignments to members',
+		source: `${any} function run() { let hits = 0; function next(value) { hits++; return value; } const o = {p: null, q: 1, r: 0}; o.p ??= any([next(0)]); o.q &&= any([next(0), 1]); o.r &&= any([next(1)]); return [o, hits]; }`,
+	},
+	{
+		name: 'arguments that await',
+		source: `${any} async function run() { const log = []; async function later(value) { log.push(value); return value; } const a = any([await later(1)]); const b = (await later(0)) || any([await later(0), await later(2)]); return [a, b, log]; }`,
+	},
+	{
+		name: 'an awaited argument after an earlier operand',
+		source: `${any} async function run() { const log = []; async function later(value) { log.push(value); return value; } return [[log.length, any([await later(3)])], log]; }`,
+	},
+	{
+		name: 'arguments that yield',
+		source: `${any} function* each() { const a = any([yield 1]); const b = a ? any([yield 2]) : any([yield 3]); return [a, b]; } function run() { const first = each(); const second = each(); return [first.next(), first.next(1), first.next(0), second.next(), second.next(0), second.next(4)]; }`,
+	},
+	{
+		name: 'a branch whose body writes a compound assignment target',
+		source: 'let total = 1; /* @inline */ function any(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; total += total ? any(1) : 0; return total; }',
+	},
+	{
+		name: 'an assignment to a member of a variable object',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(w = 1) { let oo = {p: 1}; oo.p = imp(1, w); return oo; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a compound assignment to a member of a variable object',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(w = 1) { let oo = {p: 1}; oo.p += imp(1, w); oo.p ??= imp(2, w); return oo; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'an assignment to an index that changes',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(xs = [1, 2, 3]) { const out = new Array(3); for (let i = 0; i < xs.length; i++) out[i] = imp(1, xs[i]); return out; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a compound assignment to an index that changes',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(xs = [1, 2, 3]) { const out = [0, 0, 0]; for (let i = 0; i < xs.length; i++) out[i] += imp(1, xs[i]); return out; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'an object literal after an earlier property',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\nconst h = (a, b) => [a, b];\nfunction run(e = {id: 3}) { return { id: e.id, value: imp(1, e.id) }; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a call in the key of an assignment target',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\nconst h = (a, b) => [a, b];\nfunction run(o = {}) { o[imp(1, 'k')] = 1; return o; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a pure call around a lowered pure call in a branch',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\n/* @inline @pure */ function sq(x) { return x * x; }\n/* @inline @pure */ function idx(e) { const lo = e & 255; return lo + (e >>> 8); }\nconst h = (a, b) => [a, b];\nfunction run(arr = [1, 2, 3], c = 1) { const out = []; for (let i = 0; i < arr.length; i++) out.push(c ? pur(idx(arr[i])) : 0); return out; }",
+		inlined: 'pur',
+	},
+];
+
+// Positions with no statement form. The call stays rather than run inside a function.
+const keptCases = [
+	{
+		name: 'a logical assignment to a computed member',
+		source: `${any} function run() { let reads = 0; const o = {a: null}; function key() { reads++; return "a"; } o[key()] ??= any([1]); o[key()] ??= any([0]); return [o, reads]; }`,
+	},
+	{
+		name: 'an optional chain operand',
+		source: `${any} function run() { const none = null; const some = {a: 1, b: 2}; return [none?.[any([1])], some?.[any([1]) ? "a" : "b"]]; }`,
+	},
+	{
+		name: 'a do while test',
+		source: `${any} function run() { const q = [1, 0]; let n = 0; do { q.shift(); n++; } while (any(q)); return n; }`,
+	},
+	{
+		name: 'a for update',
+		source: `${any} function run() { const out = []; for (let i = 0, found = false; i < 3; found = any([i]), i++) out.push(found); return out; }`,
+	},
+	{
+		name: 'a later declarator',
+		source: `${any} function run() { const first = [0, 1], found = any(first); return found; }`,
+	},
+	{
+		name: 'a parameter default',
+		source: `${any} function run() { function read(found = any([0, 1])) { return found; } return [read(), read(0)]; }`,
+	},
+];
+
+// Evaluation order around code that moves ahead of its statement.
+const orderCases = [
+	{
+		name: 'and around a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [1].length; const a = ok && find([0]); return [a]; }',
+	},
+	{
+		name: 'or around a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [].length; const a = ok || find([0]); return [a]; }',
+	},
+	{
+		name: 'nullish around a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [null][0]; const a = ok ?? find([0]); return [a]; }',
+	},
+	{
+		name: 'a passed on value from a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [1].length; return [[ok && find([0])]]; }',
+	},
+	{
+		name: 'a pure body beside an arm that writes a compound target',
+		source: 'let total = 1; function bump() { total += 10; return 1; } /* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { total = 1; const flag = [].length; total += flag ? any([1]) : bump(); return total; }',
+	},
+	{
+		name: 'a pure body under a test that writes a compound target',
+		source: 'let total = 1; function bump() { total += 10; return 1; } /* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { total = 1; total += bump() ? any([1]) : 0; return total; }',
+	},
+	{
+		name: 'a pure body under a test that swaps the callee',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { let f = (x) => x; function swap() { f = (x) => [x]; return 1; } return f(swap() ? any([1]) : 0); }',
+	},
+	{
+		name: 'a pure body beside an arm that swaps the method',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { const o = { m: (x) => x, swap() { this.m = (x) => [x]; return 1; } }; const flag = [].length; return o.m(flag ? any([1]) : o.swap()); }',
+	},
+	{
+		name: 'a nullish assignment that is already set',
+		source: 'let hits = 0; /* @inline */ function build(n) { for (let i = 0; i < n; i++) hits++; return hits; } function run() { hits = 0; let cache = 5; cache ??= build(3); return [cache, hits]; }',
+	},
+	{
+		name: 'a branch inside an or assignment that is already set',
+		source: 'let hits = 0; /* @inline */ function build(n) { for (let i = 0; i < n; i++) hits++; return hits; } function run() { hits = 0; let cache = 5; const c = [1].length; cache ||= c ? build(3) : 0; return [cache, hits]; }',
+	},
+	{
+		name: 'a test with effects inside an and assignment that is unset',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { let n = 0; let cache = 0; cache &&= n++ ? any([1]) : 0; return [cache, n]; }',
+	},
+	{
+		name: 'argument effects inside an or assignment that is already set',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { let n = 0; let cache = 1; cache ||= any([n++]); return [cache, n]; }',
+	},
+	{
+		name: 'a compound assignment whose target the body writes',
+		source: 'let total = 1; /* @inline */ function any(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; total += any(1); return total; }',
+	},
+	{
+		name: 'a compound assignment in a loop test beside a writer',
+		source: 'let total = 1; function bump() { total += 10; return 1; } /* @inline */ function any(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; } function run() { total = 1; let n = 0; while ((total += bump() + any(2)) < 30 && n++ < 5) {} return [total, n]; }',
+	},
+	{
+		name: 'a compound assignment reached through an opened loop test',
+		source: 'let total = 1; /* @inline */ function ready(q) { for (const v of q) if (v) return true; return false; } /* @inline */ function grow(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; let n = 0; while (ready([1]) && (total += grow(1)) < 40 && n++ < 9) {} return [total, n]; }',
+	},
+	{
+		name: 'a callee swapped by an earlier argument of a pure call',
+		source: "/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; } function run() { let g = (a, b) => [a, b, 'g']; function M() { g = (a, b) => [b, a, 'G']; return 1; } const y = g(M(), pur(2)); return y; }",
+	},
+	{
+		name: 'a callee swapped by the body',
+		source: 'let f = (x) => x; /* @inline */ function swap(xs) { for (const x of xs) f = (y) => [y, x]; return 1; } function run() { f = (x) => x; return f(swap([1])); }',
+	},
+	{
+		name: 'a compound target written by an argument of a pure call',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { let v = 1; const cap = () => v; v += psum(v++, 0); return [v, cap()]; }',
+	},
+	{
+		name: 'a callee swapped by an argument of a pure call',
+		source: "/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { let g = (x) => ['old', x]; return g(psum((g = (x) => ['new', x], 1), 0)); }",
+	},
+	{
+		name: 'a method swapped by an argument of a pure call',
+		source: "/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { const o = { m: (x) => ['old', x] }; return o.m(psum((o.m = (x) => ['new', x], 1), 0)); }",
+	},
+	{
+		name: 'a callee swapped while an argument of a pure call awaits',
+		source: "/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } async function run() { let g = (x) => ['old', x]; const p = Promise.resolve().then(() => { g = (x) => ['new', x]; return 1; }); return g(psum(await p, 0)); }",
+	},
+	{
+		name: 'a member target changed while an argument of a pure call awaits',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } class S { n = 1; async add(p) { this.n += psum(await p, 0); return this.n; } } async function run() { const s = new S(); const p = Promise.resolve().then(() => { s.n = 100; return 1; }); return s.add(p); }',
+	},
+	{
+		name: 'a compound target changed while an argument of a pure call yields',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } let total; function* gen() { total += psum(yield 1, 0); return total; } function run() { total = 1; const it = gen(); it.next(); total = 100; return it.next(1).value; }',
+	},
+	{
+		name: 'an outer variable changed while an argument awaits',
+		source: 'let total = 0; /* @inline */ function add(d) { return total + d; } async function run() { total = 1; const p = Promise.resolve().then(() => { total = 100; return 5; }); total = add(await p); return total; }',
+	},
+	{
+		name: 'an outer variable changed while an argument yields',
+		source: 'let total = 0; /* @inline */ function add(d) { return total + d; } function* gen() { return add(yield 1); } function run() { total = 1; const it = gen(); it.next(); total = 100; return it.next(5).value; }',
+	},
+	{
+		name: 'an outer variable changed by an argument',
+		source: 'let total = 0; function bump() { total = 100; return 5; } /* @inline */ function add(d) { return total + d; } function run() { total = 1; return add(bump()); }',
+	},
+	{
+		name: 'a local compound target written by an argument',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; v += imp(v++); return [v]; }',
+	},
+	{
+		name: 'a local compound target written by the other arm of a branch',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; const c = [].length; v += c ? imp(1) : v++; return [v]; }',
+	},
+	{
+		name: 'a local compound target written by the test of a branch',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; v += v++ ? imp(1) : 0; return [v]; }',
+	},
+	{
+		name: 'a local compound target written by the left of a logical branch',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; v += (v = 7) && imp(1); return [v]; }',
+	},
+	{
+		name: 'a local compound target written by a branch test around a pure call',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { let v = 1; v += v++ ? psum(1, 0) : 0; return [v]; }',
+	},
+	{
+		name: 'a local compound target written by a class field the body runs',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } /* @inline */ function make(C) { for (let i = 0; i < 2; i++) new C(); return 100; } function run() { let v = 1; class C { n = v++; } v += make(C); return [v]; }',
+	},
+	{
+		name: 'a compound assignment to a member',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { const o = { n: 1 }; o.n += imp(1); return o.n; }',
+	},
+	{
+		name: 'a compound assignment to a member of this',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } class C { n = 1; add(x) { this.n += imp(x); return this.n; } } function run() { return new C().add(2); }',
+	},
+];
+
+describe('branch positions', () => {
+	it.each(orderCases)('keeps the order of $name', async ({ source }) => {
+		await compareBuilds({ 'main.js': `${source}\nexport {run};` });
+	});
+
+	it('expands a body into a compound assignment inside another expanded body', async () => {
+		await compareBuilds(
+			{
+				'main.js':
+					'const log = []; /* @inline */ function weight(x) { for (let i = 0; i < 1; i++) log.push(x); return x * 2; } function run() { const r = sum([1, 2]); return [r, log.length]; } /* @inline */ function sum(xs) { let total = 0; for (const x of xs) total += weight(x); return total; }\nexport {run};',
+			},
+			'weight'
+		);
+	});
+
+	it('expands pure calls on both arms of a branch passed to a method', async () => {
+		await compareBuilds(
+			{
+				'main.js':
+					'/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { const o = { m: (x) => [x] }; const c = [1].length; return o.m(c ? psum(1, 0) : psum(2, 0)); }\nexport {run};',
+			},
+			'psum'
+		);
+	});
+
+	it('reads a spilled callee in place when a second body runs ahead of the call', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js':
+					'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let g = (a, b) => [a, b]; const set = () => { g = null; }; return g(imp(1), imp(2)); }\nexport {run};',
+			},
+			'imp'
+		);
+		const caller = result.code.slice(result.code.indexOf('function run('));
+		expect(caller.match(/\bconst _operand\d* = /g)).toHaveLength(1);
+	});
+
+	it('reads an imported callee before a body that makes its module assign it again', async () => {
+		await compareBuilds(
+			{
+				'lib.js':
+					"export let handler = (x) => ['old', x]; export function install() { handler = (x) => ['new', x]; } export /* @inline */ function step(n) { for (let i = 0; i < n; i++) install(); return 1; }",
+				'main.js':
+					"import {handler, step} from './lib.js'; export function run() { return handler(step(1)); }",
+			},
+			'step'
+		);
+	});
+
+	it('reads an imported callee through a chain of modules that export it again', async () => {
+		await compareBuilds(
+			{
+				'lib.js':
+					"export let handler = (x) => ['old', x]; export function install() { handler = (x) => ['new', x]; } export /* @inline */ function step(n) { for (let i = 0; i < n; i++) install(); return 1; }",
+				'a.js': "export {handler} from './lib.js';",
+				'b.js': "export * from './a.js';",
+				'c.js': "export {handler as live} from './b.js';",
+				'd.js': "export * from './c.js';",
+				'e.js': "export {live} from './d.js';",
+				'f.js': "export * from './e.js';",
+				'main.js':
+					"import {live} from './f.js'; import {step} from './lib.js'; export function run() { return live(step(1)); }",
+			},
+			'step'
+		);
+	});
+
+	it('expands a body into a compound assignment to a variable only the caller can write', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} export function run() { let total = 1; total += any([0, 1]) ? 2 : 0; total += [1].length ? any([1]) : 0; return total; }`,
+			},
+			'any'
+		);
+		expect(result.code).not.toContain('(() => {');
+	});
+
+	it.each(flattenedCases)('flattens $name', async ({ source, inlined }) => {
+		const result = await compareBuilds(
+			{ 'main.js': `${source}\nexport {run};` },
+			inlined ?? 'any'
+		);
+		expect(result.code).not.toContain('(() => {');
+	});
+
+	it.each(keptCases)('keeps the call at $name', async ({ source }) => {
+		const result = await compareBuilds({ 'main.js': `${source}\nexport {run};` });
+		expect(result.code).toMatch(/(?<!function )\bany\s*\(/);
+		expect(result.code).not.toContain('(() => {');
+	});
+
+	it('returns from each path of a returned branch without a result variable', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} function pick(c, xs) { return c ? xs.length : any(xs); } export function run() { return [pick(1, [1]), pick(0, [1])]; }`,
+			},
+			'any'
+		);
+		const caller = result.code.slice(result.code.indexOf('function pick('));
+		expect(caller).not.toContain('_result');
+		expect(caller).not.toContain('_inline');
+		expect(caller).not.toContain('_branch');
+	});
+
+	it('assigns a declared variable directly on each path', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} export function run() { const log = []; const value = log.push(1) && any([0, 1]); return [value, log]; }`,
+			},
+			'any'
+		);
+		const caller = result.code.slice(result.code.indexOf('function run('));
+		expect(caller).not.toContain('_result');
+		expect(caller).not.toContain('_branch');
+	});
+
+	it('nests an and that guards a lone consequent', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} function kind(a, xs) { if (a && any(xs)) { return "any"; } return "none"; } export function run() { return [kind(1, [1]), kind(1, [0]), kind(0, [1])]; }`,
+			},
+			'any'
+		);
+		expect(result.code.slice(result.code.indexOf('function kind('))).not.toContain('_branch');
+	});
+});
+
 const moduleCases: { name: string; files: Record<string, string> }[] = [
 	{
 		name: 'same function names in different modules resolve independently',

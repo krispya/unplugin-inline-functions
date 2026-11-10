@@ -1,6 +1,6 @@
 import _generate from '@babel/generator';
 import { ParseResult } from '@babel/parser';
-import _traverse, { NodePath, Scope } from '@babel/traverse';
+import _traverse, { NodePath, Scope, Visitor } from '@babel/traverse';
 import * as t from '@babel/types';
 import { InlinableFunction, resolveCall } from './collect-metadata';
 import { dedupVariables } from './dedup-variables';
@@ -8,7 +8,16 @@ import { eliminateWrites } from './eliminate-writes';
 import { scalarReplace } from './scalar-replace';
 import { STATS } from './stats';
 import { getBabelDefaultExport } from './utils/babel-exports';
-import { enclosingStatement, hoistAnchor, insertBeforeStatement } from './utils/call-position';
+import {
+	enclosingStatement,
+	effectFree,
+	hoistAnchor,
+	insertBeforeStatement,
+	registerDeclarations,
+	spillOperands,
+	unnamed,
+} from './utils/call-position';
+import { flattenBranch, Flattening } from './utils/flatten-branch';
 import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
 import { getFunctionName } from './utils/get-function-name';
 import { planSubstitutions } from './utils/argument-plan';
@@ -16,6 +25,7 @@ import { lowerToExpression } from './utils/lower-to-expression';
 import { hasColdAnnotation, outlineCold } from './outline-cold';
 import { isTerminal, restructureReturns, terminates } from './utils/restructure-returns';
 import {
+	expandable,
 	localizeVars,
 	prepareInlineFunction,
 	stableArgument,
@@ -77,13 +87,9 @@ function expandsFlat(
 
 /** Detach a value from its reference so receivers and inferred names match a call result. */
 function detached(value: t.Expression) {
-	return t.isMemberExpression(value) ||
-		t.isOptionalMemberExpression(value) ||
-		t.isFunctionExpression(value) ||
-		t.isArrowFunctionExpression(value) ||
-		t.isClassExpression(value)
+	return t.isMemberExpression(value) || t.isOptionalMemberExpression(value)
 		? t.sequenceExpression([t.numericLiteral(0), value])
-		: value;
+		: unnamed(value);
 }
 
 /** A value whose evaluation can be dropped when the result is unused. */
@@ -94,6 +100,19 @@ function trivial(node: t.Expression | null | undefined) {
 		t.isLiteral(node) ||
 		t.isUnaryExpression(node, { operator: 'void' })
 	);
+}
+
+/** Whether a path still leads up to the program, which moving an ancestor's code breaks. */
+function attached(path: NodePath) {
+	let current = path;
+	while (current.parentPath) {
+		const parent = current.parentPath.node as unknown as Record<string, unknown>;
+		const holder = (current.listKey ? parent[current.listKey] : parent) as
+			Record<string | number, unknown> | undefined;
+		if (!holder || holder[current.key as string | number] !== current.node) return false;
+		current = current.parentPath;
+	}
+	return current.isProgram();
 }
 
 export interface Expansion {
@@ -118,6 +137,8 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 	const initializedSnapshots = new WeakSet<t.Identifier>();
 	const loweredParameters = new WeakSet<t.Identifier>();
 	const flatExpansions = new Map<string, boolean>();
+	const branchResults = new WeakMap<t.Node, boolean>();
+	const settled = new WeakSet<t.Identifier>();
 	// Scope crawls discard UID reservations for labels in nested blocks. Keep an
 	// independent reservation set for the lifetime of this module's transformation.
 	const labels = new Set<string>();
@@ -156,9 +177,19 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				body.replaceWith(t.blockStatement([t.returnStatement(body.node as t.Expression)]));
 		},
 	});
-	traverse(ast, {
+	// Flattening a branch moves code that this walk has yet to reach. The rest of that
+	// function waits, and the function is walked again on its own to meet the call where
+	// its body can run in place.
+	const flattened = new Set<t.Node>();
+	const pending = new Set<NodePath>();
+	// A call that cannot expand stays that way, so later walks pass over it.
+	const kept = new WeakSet<t.Node>();
+	const visitor: Visitor = {
 		CallExpression: {
 			exit(path) {
+				if (kept.has(path.node)) return;
+				if (flattened.size && path.findParent((ancestor) => flattened.has(ancestor.node)))
+					return;
 				const fn = resolveCall(path);
 				if (!fn) return;
 				if (
@@ -181,11 +212,48 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				if (!calleeInitialized(path, fn)) return;
 				const parentFunction = path.getFunctionParent();
 				if (parentFunction && options.skip?.(parentFunction.node, fn.key)) return;
+				const context: Flattening = {
+					stable: (node) =>
+						stableArgument(node, path, initializedSnapshots, loweredParameters, settled),
+					snapshots: initializedSnapshots,
+					settled,
+					results: branchResults,
+				};
+				// The arguments run ahead with the body, so their effects count as its own.
+				const pure = fn.pure && effectFree(path);
+				const flatten = () => {
+					if (flattenBranch(path, pure, context)) {
+						const owner = parentFunction ?? path.scope.getProgramParent().path;
+						flattened.add(owner.node);
+						pending.add(owner);
+					} else kept.add(path.node);
+				};
+				// A body that can never be one expression needs a statement position. With
+				// none here, the rewrite toward one comes before any work on the body.
+				const source = fn.func.body;
+				const oneReturn =
+					!t.isBlockStatement(source) ||
+					(source.body.length === 1 && t.isReturnStatement(source.body[0]));
+				const site = path.parentPath;
+				if (
+					!oneReturn &&
+					!site.isReturnStatement() &&
+					!site.isExpressionStatement() &&
+					!expandsFlat(fn, flatExpansions) &&
+					!hoistAnchor(path, pure, context.stable)
+				) {
+					if (expandable(path, fn)) flatten();
+					else kept.add(path.node);
+					return;
+				}
 				const prepared = prepareInlineFunction(path, fn, (name) =>
 					newLabel(path.scope, name)
 				);
-				if (!prepared) return;
-				const { functionPath, imports } = prepared;
+				if (!prepared) {
+					kept.add(path.node);
+					return;
+				}
+				const { functionPath, imports, mutable } = prepared;
 				const original = path.node;
 				const next = new Set([...parents, fn.key]);
 				const args = original.arguments as t.Expression[];
@@ -196,11 +264,11 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				// Sequences preserve GetValue semantics (receivers, indirect eval, delete, names).
 				const bindings = params.map((param) => functionPath.scope.getBinding(param.name)!);
 				const stable = args.map((argument) =>
-					stableArgument(argument, path, initializedSnapshots, loweredParameters)
+					stableArgument(argument, path, initializedSnapshots, loweredParameters, settled)
 				);
 				for (let index = args.length; index < params.length; index++) stable.push(true);
 				const surplus = args.slice(params.length).some((argument) => !trivial(argument));
-				const plan = planSubstitutions(body.body, params, bindings, stable, surplus);
+				const plan = planSubstitutions(body.body, params, bindings, stable, surplus, mutable);
 				for (const index of plan) {
 					const argument = args[index];
 					for (const reference of bindings[index].referencePaths) {
@@ -225,36 +293,40 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					replacement = detached(body.body[0].argument || undefinedValue());
 				}
 
-				// Keep the original import: other references and module initialization still matter.
-				if (imports.length) {
-					const program = path.scope.getProgramParent().path as NodePath<t.Program>;
-					// Register only the injected imports. A full crawl would discard the UID
-					// reservations for invocation locals that have not been inserted yet.
-					for (const declaration of program.unshiftContainer('body', imports))
-						program.scope.registerDeclaration(declaration);
-				}
-				STATS.incrementInlinedFunctionCount(fn.name);
-				if (parentFunction && options.expansions) {
-					let weight = 0;
-					t.traverseFast(body, () => {
-						weight++;
-					});
-					const list = options.expansions.get(parentFunction.node) ?? [];
-					list.push({ key: fn.key, name: fn.name, weight });
-					options.expansions.set(parentFunction.node, list);
-				}
-				if (parentFunction) {
-					const pure = (transformed.get(parentFunction) ?? true) && fn.pure;
-					transformed.set(parentFunction, pure);
-					STATS.setTransformedFunction(getFunctionName(parentFunction), pure);
-				}
-				removeDecorators(original);
-				// Argument effects now live inside the expansion. A PURE annotation on a
-				// zero-argument wrapper would incorrectly let bundlers erase those effects.
-				original.leadingComments = original.leadingComments?.filter(
-					(comment) => !/[@#]__PURE__/.test(comment.value)
-				);
+				// Record the expansion once a place for it is known. Until then the caller is untouched.
+				const commit = () => {
+					// Keep the original import: other references and module initialization still matter.
+					if (imports.length) {
+						const program = path.scope.getProgramParent().path as NodePath<t.Program>;
+						// Register only the injected imports. A full crawl would discard the UID
+						// reservations for invocation locals that have not been inserted yet.
+						for (const declaration of program.unshiftContainer('body', imports))
+							program.scope.registerDeclaration(declaration);
+					}
+					STATS.incrementInlinedFunctionCount(fn.name);
+					if (parentFunction && options.expansions) {
+						let weight = 0;
+						t.traverseFast(body, () => {
+							weight++;
+						});
+						const list = options.expansions.get(parentFunction.node) ?? [];
+						list.push({ key: fn.key, name: fn.name, weight });
+						options.expansions.set(parentFunction.node, list);
+					}
+					if (parentFunction) {
+						const pure = (transformed.get(parentFunction) ?? true) && fn.pure;
+						transformed.set(parentFunction, pure);
+						STATS.setTransformedFunction(getFunctionName(parentFunction), pure);
+					}
+					removeDecorators(original);
+					// Argument effects now live inside the expansion. A PURE annotation on a
+					// zero-argument wrapper would incorrectly let bundlers erase those effects.
+					original.leadingComments = original.leadingComments?.filter(
+						(comment) => !/[@#]__PURE__/.test(comment.value)
+					);
+				};
 				if (replacement) {
+					commit();
 					mark(replacement, next);
 					path.replaceWith(replacement);
 					return;
@@ -293,6 +365,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 
 				// At a return site the callee's returns are the caller's returns.
 				if (parent.isReturnStatement()) {
+					commit();
 					const block = t.blockStatement([...prologue, ...body.body]);
 					const last =
 						parent.inList &&
@@ -306,6 +379,48 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 
 				// Early returns become branches so that exits need no jump.
 				restructureReturns(body.body);
+
+				// When the call is unconditional, earlier operands move into temporaries and
+				// the body runs just ahead of the statement.
+				const unused = parent.isExpressionStatement();
+				const hoist = unused ? undefined : hoistAnchor(path, pure, context.stable);
+				if (!unused && !hoist) {
+					// Straight-line bodies become one expression in place, with hoisted block bindings.
+					let closures = false;
+					t.traverseFast(body, (node) => {
+						if (t.isFunction(node) || t.isClass(node)) closures = true;
+					});
+					const statement =
+						closures || !expandsFlat(fn, flatExpansions)
+							? undefined
+							: enclosingStatement(path);
+					const lowered = statement && lowerToExpression([...prologue, ...body.body]);
+					if (statement && lowered) {
+						commit();
+						if (lowered.declared.length) {
+							const declaration = t.variableDeclaration(
+								'let',
+								lowered.declared.map((id) => {
+									const clone = t.cloneNode(id);
+									if (parameterIds.has(id)) loweredParameters.add(clone);
+									return t.variableDeclarator(clone);
+								})
+							);
+							const [inserted] = insertBeforeStatement(statement, [declaration]);
+							inserted.scope.registerDeclaration(inserted);
+						}
+						mark(lowered.expression, next);
+						path.replaceWith(lowered.expression);
+						return;
+					}
+					// Any other body needs statements. The enclosing branch or loop test becomes
+					// statements and the next walk expands the call there. Wrapping the body in a
+					// function would allocate on every pass, so with no statement form the call stays.
+					flatten();
+					return;
+				}
+				commit();
+
 				const bodyPath = functionPath.get('body');
 				const returns: NodePath<t.ReturnStatement>[] = [];
 				functionPath.traverse({
@@ -351,30 +466,12 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					return statements;
 				}
 
-				if (parent.isExpressionStatement()) {
+				if (!hoist) {
 					parent.replaceWith(frame()[0]);
 					return;
 				}
-
-				// When the call is unconditional, earlier operands move into temporaries and
-				// the body runs just ahead of the statement.
-				const hoist = hoistAnchor(path, fn.pure, (node) =>
-					stableArgument(node, path, initializedSnapshots, loweredParameters)
-				);
-				const anchor = hoist?.anchor;
-				const spill = () => {
-					const statements: t.Statement[] = [];
-					for (const operand of hoist!.spills) {
-						const id = path.scope.generateUidIdentifier('operand');
-						initializedSnapshots.add(id);
-						statements.push(
-							t.variableDeclaration('const', [t.variableDeclarator(id, operand.node)])
-						);
-						operand.replaceWith(t.cloneNode(id));
-					}
-					return statements;
-				};
-				if (anchor && singleExit) {
+				const anchor = hoist.anchor;
+				if (singleExit) {
 					const value = returns.length ? returns[0].node.argument : undefined;
 					if (returns.length) returns[0].remove();
 					const statements = [...prologue, ...body.body];
@@ -382,92 +479,95 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					const expression = detached(value || undefinedValue());
 					mark(expression, next);
 					path.replaceWith(expression);
-					const spilled = spill();
+					const spilled = spillOperands(hoist, initializedSnapshots);
 					if (statements.length || spilled.length)
-						insertBeforeStatement(anchor, [...spilled, ...statements]);
+						registerDeclarations(
+							insertBeforeStatement(anchor, [...spilled, ...statements]),
+							spilled.length
+						);
 					return;
 				}
-				if (anchor) {
-					// A declared variable receives the result directly.
-					const declarator = parent.isVariableDeclarator() ? parent : undefined;
-					const declaration = declarator?.parentPath as
-						NodePath<t.VariableDeclaration> | undefined;
-					if (
-						declarator &&
-						declaration &&
-						t.isIdentifier(declarator.node.id) &&
-						declaration.node.declarations.length === 1 &&
-						declaration.node.kind !== 'var' &&
-						declaration.inList &&
-						anchor === declaration
-					) {
-						const id = declarator.node.id;
-						const statements = frame(id);
+
+				// A flattened branch receives the result directly. The target of a logical
+				// branch holds the left operand, which a body that ends without returning clears.
+				const holdsValue = branchResults.get(parent.node);
+				if (holdsValue !== undefined && anchor === parent.parentPath) {
+					const target = (parent.node as t.AssignmentExpression).left as t.Identifier;
+					const clear =
+						holdsValue && !terminates(t.blockStatement(body.body))
+							? [
+									t.expressionStatement(
+										t.assignmentExpression(
+											'=',
+											t.cloneNode(target),
+											undefinedValue()
+										)
+									),
+								]
+							: [];
+					anchor.replaceWithMultiple([...clear, ...frame(target)]);
+					return;
+				}
+
+				// A declared variable receives the result directly.
+				const declarator = parent.isVariableDeclarator() ? parent : undefined;
+				const declaration = declarator?.parentPath as
+					NodePath<t.VariableDeclaration> | undefined;
+				if (
+					declarator &&
+					declaration &&
+					t.isIdentifier(declarator.node.id) &&
+					declaration.node.declarations.length === 1 &&
+					declaration.node.kind !== 'var' &&
+					declaration.inList &&
+					anchor === declaration
+				) {
+					const id = declarator.node.id;
+					const statements = frame(id);
+					const spilled = spillOperands(hoist, initializedSnapshots);
+					registerDeclarations(
 						declaration.replaceWithMultiple([
-							...spill(),
+							...spilled,
 							t.variableDeclaration('let', [t.variableDeclarator(t.cloneNode(id))]),
 							...statements,
-						]);
-						return;
-					}
-					const result = path.scope.generateUidIdentifier('result');
-					const statements = frame(result);
-					path.replaceWith(t.cloneNode(result));
-					insertBeforeStatement(anchor, [
-						...spill(),
-						t.variableDeclaration('let', [t.variableDeclarator(t.cloneNode(result))]),
-						...statements,
-					]);
+						]),
+						spilled.length
+					);
 					return;
 				}
-
-				// Straight-line bodies become one expression in place, with hoisted block bindings.
-				let closures = false;
-				t.traverseFast(body, (node) => {
-					if (t.isFunction(node) || t.isClass(node)) closures = true;
-				});
-				const statement =
-					closures || !expandsFlat(fn, flatExpansions)
-						? undefined
-						: enclosingStatement(path);
-				const lowered = statement && lowerToExpression([...prologue, ...body.body]);
-				if (statement && lowered) {
-					if (lowered.declared.length) {
-						const declaration = t.variableDeclaration(
-							'let',
-							lowered.declared.map((id) => {
-								const clone = t.cloneNode(id);
-								if (parameterIds.has(id)) loweredParameters.add(clone);
-								return t.variableDeclarator(clone);
-							})
-						);
-						const [inserted] = insertBeforeStatement(statement, [declaration]);
-						inserted.scope.registerDeclaration(inserted);
-					}
-					mark(lowered.expression, next);
-					path.replaceWith(lowered.expression);
-					return;
-				}
-
-				// Conditional positions keep the expansion at the original expression position.
 				const result = path.scope.generateUidIdentifier('result');
 				const statements = frame(result);
-				const wrapper = t.callExpression(
-					t.arrowFunctionExpression(
-						[],
-						t.blockStatement([
-							t.variableDeclaration('let', [t.variableDeclarator(t.cloneNode(result))]),
-							...statements,
-							t.returnStatement(t.cloneNode(result)),
-						])
-					),
-					[]
+				path.replaceWith(t.cloneNode(result));
+				const spilled = spillOperands(hoist, initializedSnapshots);
+				// The frame writes the result ahead of its one read, so later expansions
+				// can leave that read in place.
+				settled.add(result);
+				registerDeclarations(
+					insertBeforeStatement(anchor, [
+						...spilled,
+						t.variableDeclaration('let', [t.variableDeclarator(result)]),
+						...statements,
+					]),
+					spilled.length + 1
 				);
-				mark(wrapper, next);
-				path.replaceWith(wrapper);
 			},
 		},
-	});
+	};
+	traverse(ast, visitor);
+	while (pending.size) {
+		const owners = [...pending];
+		pending.clear();
+		flattened.clear();
+		// A rewrite in an enclosing function can move a waiting function to a new place.
+		const moved = new Set(owners.filter((owner) => !attached(owner)).map((owner) => owner.node));
+		if (moved.size)
+			traverse(ast, {
+				Function(path) {
+					if (moved.delete(path.node)) owners.push(path);
+				},
+			});
+		for (const owner of owners) if (attached(owner)) owner.traverse(visitor);
+	}
 	const optimized = new Set([...transformed.keys(), ...scalarReplace(ast, transformed.keys())]);
 	dedupVariables(optimized);
 	eliminateWrites(optimized);

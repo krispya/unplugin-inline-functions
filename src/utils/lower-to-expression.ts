@@ -18,6 +18,9 @@ function sequence(parts: t.Expression[]): t.Expression {
 	return parts.length === 1 ? parts[0] : t.sequenceExpression(parts);
 }
 
+/** Assignments that stand for the declarations of a lowered body. They write its own temporaries. */
+export const loweredAssignments = new WeakSet<t.Node>();
+
 /**
  * Rewrite a straight-line statement list as one expression. Block bindings become
  * assignments to variables the caller declares ahead of the enclosing statement, so
@@ -34,10 +37,15 @@ export function lowerToExpression(statements: t.Statement[]) {
 				if (statement.kind !== 'const' && statement.kind !== 'let') return;
 				for (const declaration of statement.declarations) {
 					declared.push(...Object.values(t.getBindingIdentifiers(declaration.id)));
-					if (declaration.init)
-						parts.push(
-							t.assignmentExpression('=', declaration.id as t.LVal, declaration.init)
+					if (declaration.init) {
+						const assignment = t.assignmentExpression(
+							'=',
+							declaration.id as t.LVal,
+							declaration.init
 						);
+						if (t.isIdentifier(declaration.id)) loweredAssignments.add(assignment);
+						parts.push(assignment);
+					}
 				}
 				continue;
 			}
