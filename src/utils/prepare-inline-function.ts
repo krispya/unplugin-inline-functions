@@ -207,23 +207,6 @@ export function prepareInlineFunction(
 	newLabel: (name: string) => t.Identifier
 ) {
 	if (call.node.arguments.some((argument) => !t.isExpression(argument))) return;
-	// These expressions belong to the caller's async/generator context, which a wrapper cannot move.
-	let suspended = false;
-	for (const argument of call.get('arguments')) {
-		if (argument.isAwaitExpression() || argument.isYieldExpression()) suspended = true;
-		argument.traverse({
-			Function(path) {
-				path.skip();
-			},
-			AwaitExpression() {
-				suspended = true;
-			},
-			YieldExpression() {
-				suspended = true;
-			},
-		});
-	}
-	if (suspended) return;
 	const dependencies = dependencyPlan(call, fn);
 	if (!dependencies) return;
 	const expression = t.functionExpression(

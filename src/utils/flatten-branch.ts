@@ -1,24 +1,57 @@
 import { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import {
+	constantValue,
 	effectFree,
 	hoistAnchor,
 	hoistLevel,
 	insertBeforeStatement,
 	spillOperands,
 	transparent,
+	unnamed,
 } from './call-position';
 
 type Stable = (node: t.Expression) => boolean;
 type Branch = NodePath<t.LogicalExpression> | NodePath<t.ConditionalExpression>;
 type TestedLoop = NodePath<t.WhileStatement> | NodePath<t.ForStatement>;
 
+type LogicalAssignment = NodePath<t.AssignmentExpression>;
+
+/**
+ * A logical assignment whose target reads the same on a second evaluation, so that
+ * a ??= b can be written a ?? (a = b).
+ */
+function logicalAssignment(path: NodePath): path is LogicalAssignment {
+	if (!path.isAssignmentExpression()) return false;
+	const { left, operator } = path.node;
+	if (operator !== '&&=' && operator !== '||=' && operator !== '??=') return false;
+	return (
+		t.isIdentifier(left) ||
+		(t.isMemberExpression(left) &&
+			!left.computed &&
+			(t.isIdentifier(left.object) || t.isThisExpression(left.object)))
+	);
+}
+
 /** An operand that only some paths through its parent expression evaluate. */
 function inBranch(child: NodePath) {
 	const parent = child.parentPath!;
 	return (
 		(parent.isLogicalExpression() && child.key === 'right') ||
-		(parent.isConditionalExpression() && child.key !== 'test')
+		(parent.isConditionalExpression() && child.key !== 'test') ||
+		(logicalAssignment(parent) && child.key === 'right')
+	);
+}
+
+/** Spell a logical assignment as the logical expression it stands for. */
+function expandLogicalAssignment(assignment: LogicalAssignment) {
+	const { left, operator, right } = assignment.node;
+	assignment.replaceWith(
+		t.logicalExpression(
+			operator.slice(0, -1) as t.LogicalExpression['operator'],
+			t.cloneNode(left) as t.Expression,
+			t.assignmentExpression('=', left, right)
+		)
 	);
 }
 
@@ -26,22 +59,6 @@ function inBranch(child: NodePath) {
 function inLoopTest(child: NodePath) {
 	const parent = child.parentPath!;
 	return (parent.isWhileStatement() || parent.isForStatement()) && child.key === 'test';
-}
-
-/** Keep an anonymous function or class from taking the name of the variable that receives it. */
-function unnamed(value: t.Expression) {
-	const anonymous =
-		t.isArrowFunctionExpression(value) ||
-		((t.isFunctionExpression(value) || t.isClassExpression(value)) && !value.id);
-	return anonymous ? t.sequenceExpression([t.numericLiteral(0), value]) : value;
-}
-
-/** A value whose evaluation has no effect and cannot fail. */
-function inert(value: t.Expression) {
-	return (
-		(t.isLiteral(value) && !t.isTemplateLiteral(value)) ||
-		(t.isUnaryExpression(value, { operator: 'void' }) && t.isLiteral(value.argument))
-	);
 }
 
 /** The test under which a logical expression goes on to evaluate its right operand. */
@@ -160,9 +177,9 @@ function liftBranch(
 			const taken = t.blockStatement([t.expressionStatement(consequent)]);
 			const other = t.blockStatement([t.expressionStatement(alternate)]);
 			parent.replaceWith(
-				inert(consequent)
+				constantValue(consequent)
 					? t.ifStatement(t.unaryExpression('!', test), other)
-					: t.ifStatement(test, taken, inert(alternate) ? null : other)
+					: t.ifStatement(test, taken, constantValue(alternate) ? null : other)
 			);
 			return true;
 		}
@@ -247,15 +264,20 @@ export function flattenBranch(
 	results: WeakMap<t.Node, boolean>
 ) {
 	if (!flattens(call, pure, stable)) return false;
-	let outer: Branch | undefined;
+	let outer: Branch | LogicalAssignment | undefined;
 	let current: NodePath = call;
 	while (!current.parentPath!.isStatement()) {
-		if (inBranch(current)) outer = current.parentPath as Branch;
+		if (inBranch(current)) outer = current.parentPath as Branch | LogicalAssignment;
 		current = current.parentPath!;
 	}
 	if (inLoopTest(current)) {
 		openLoopTest(current.parentPath as TestedLoop);
 		return true;
 	}
-	return outer ? liftBranch(outer, call, pure, stable, snapshots, results) : false;
+	if (!outer) return false;
+	if (outer.isAssignmentExpression()) {
+		expandLogicalAssignment(outer);
+		return true;
+	}
+	return liftBranch(outer as Branch, call, pure, stable, snapshots, results);
 }

@@ -13,6 +13,7 @@ import {
 	hoistAnchor,
 	insertBeforeStatement,
 	spillOperands,
+	unnamed,
 } from './utils/call-position';
 import { flattenBranch } from './utils/flatten-branch';
 import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
@@ -83,13 +84,9 @@ function expandsFlat(
 
 /** Detach a value from its reference so receivers and inferred names match a call result. */
 function detached(value: t.Expression) {
-	return t.isMemberExpression(value) ||
-		t.isOptionalMemberExpression(value) ||
-		t.isFunctionExpression(value) ||
-		t.isArrowFunctionExpression(value) ||
-		t.isClassExpression(value)
+	return t.isMemberExpression(value) || t.isOptionalMemberExpression(value)
 		? t.sequenceExpression([t.numericLiteral(0), value])
-		: value;
+		: unnamed(value);
 }
 
 /** A value whose evaluation can be dropped when the result is unused. */

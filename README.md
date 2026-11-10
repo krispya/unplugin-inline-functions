@@ -399,9 +399,9 @@ function has(world, target) {
 }
 ```
 
-This covers `?:`, `&&`, `||` and `??` wherever their value is returned, unused, declared, assigned or passed on, and the tests of `while` and `for` loops.
+This covers `?:`, `&&`, `||` and `??` wherever their value is returned, unused, declared, assigned or passed on, the logical assignments `&&=`, `||=` and `??=`, and the tests of `while` and `for` loops.
 
-A call stays a call where no statement form exists: operands of an optional chain, the right side of `&&=`, `||=` and `??=`, the test of `do while`, a `for` update, later declarators of one declaration, parameter defaults and class fields.
+A call stays a call where no statement form exists: operands of an optional chain, a logical assignment to a computed member, the test of `do while`, a `for` update, later declarators of one declaration, parameter defaults and class fields.
 
 A call also stays where running its body early would change what the statement already read. A body that is not `@pure` is kept as an argument of a method call such as `out.push(next())`, because the method is read first, and on the right of a compound assignment such as `total += next()` unless `total` is a local that no closure captures. Moving a branch moves its test and its other arm too, so a branch that calls or assigns anywhere is treated as impure even around a `@pure` body.
 

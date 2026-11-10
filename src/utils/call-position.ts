@@ -32,6 +32,20 @@ export function transparent(path: NodePath) {
 	);
 }
 
+/** A value whose evaluation has no effect and cannot fail. */
+export function constantValue(node: t.Node): boolean {
+	if (t.isLiteral(node) && !t.isTemplateLiteral(node)) return true;
+	return t.isUnaryExpression(node, { operator: 'void' }) && constantValue(node.argument);
+}
+
+/** Keep an anonymous function or class from taking the name of the variable that receives it. */
+export function unnamed(value: t.Expression) {
+	const anonymous =
+		t.isArrowFunctionExpression(value) ||
+		((t.isFunctionExpression(value) || t.isClassExpression(value)) && !value.id);
+	return anonymous ? t.sequenceExpression([t.numericLiteral(0), value]) : value;
+}
+
 /** Whether evaluating a node runs nothing that could write state, apart from one given call. */
 export function effectFree(node: t.Node, except?: t.Node) {
 	let free = true;
@@ -167,8 +181,7 @@ function precedingOperands(
 
 /** A value that can stay in place while a body runs ahead of it. */
 function fixedOperand(node: t.Node, stable: (node: t.Expression) => boolean) {
-	if (t.isLiteral(node) && !t.isTemplateLiteral(node)) return true;
-	if (t.isThisExpression(node) || t.isFunction(node)) return true;
+	if (constantValue(node) || t.isThisExpression(node) || t.isFunction(node)) return true;
 	if (t.isUnaryExpression(node, { operator: 'void' })) return fixedOperand(node.argument, stable);
 	return t.isExpression(node) && stable(node);
 }

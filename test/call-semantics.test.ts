@@ -452,10 +452,34 @@ const flattenedCases: { name: string; source: string; inlined?: string }[] = [
 		name: 'a branch beside await',
 		source: `${any} async function run() { const a = (await 1) ? any([1]) : await 2; const b = (await 0) || any([0]); return [a, b]; }`,
 	},
+	{
+		name: 'logical assignments to variables',
+		source: `${any} function run() { let hits = 0; function next(value) { hits++; return value; } let a = 0; let b = 5; a ||= any([next(1)]); b ??= any([next(1)]); const c = (a &&= any([next(0)])); return [a, b, c, hits]; }`,
+	},
+	{
+		name: 'logical assignments to members',
+		source: `${any} function run() { let hits = 0; function next(value) { hits++; return value; } const o = {p: null, q: 1, r: 0}; o.p ??= any([next(0)]); o.q &&= any([next(0), 1]); o.r &&= any([next(1)]); return [o, hits]; }`,
+	},
+	{
+		name: 'arguments that await',
+		source: `${any} async function run() { const log = []; async function later(value) { log.push(value); return value; } const a = any([await later(1)]); const b = (await later(0)) || any([await later(0), await later(2)]); return [a, b, log]; }`,
+	},
+	{
+		name: 'an awaited argument after an earlier operand',
+		source: `${any} async function run() { const log = []; async function later(value) { log.push(value); return value; } return [[log.length, any([await later(3)])], log]; }`,
+	},
+	{
+		name: 'arguments that yield',
+		source: `${any} function* each() { const a = any([yield 1]); const b = a ? any([yield 2]) : any([yield 3]); return [a, b]; } function run() { const first = each(); const second = each(); return [first.next(), first.next(1), first.next(0), second.next(), second.next(0), second.next(4)]; }`,
+	},
 ];
 
 // Positions with no statement form. The call stays rather than run inside a function.
 const keptCases = [
+	{
+		name: 'a logical assignment to a computed member',
+		source: `${any} function run() { let reads = 0; const o = {a: null}; function key() { reads++; return "a"; } o[key()] ??= any([1]); o[key()] ??= any([0]); return [o, reads]; }`,
+	},
 	{
 		name: 'an optional chain operand',
 		source: `${any} function run() { const none = null; const some = {a: 1, b: 2}; return [none?.[any([1])], some?.[any([1]) ? "a" : "b"]]; }`,
