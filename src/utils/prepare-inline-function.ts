@@ -4,6 +4,7 @@ import {
 	bindingKey,
 	exportedBindingName,
 	InlinableFunction,
+	reassignedImport,
 	resolveBinding,
 	resolveSource,
 	sameExternalSource,
@@ -135,6 +136,7 @@ function dependencyPlan(call: NodePath<t.CallExpression>, fn: InlinableFunction)
 	const callerFile = call.scope.getProgramParent().path.node.loc?.filename;
 	const names = new Map<string, string>();
 	const imports: t.ImportDeclaration[] = [];
+	const changing: string[] = [];
 	for (const [name, binding] of free) {
 		const callerBinding = call.scope.getBinding(name);
 		if (!binding) {
@@ -142,6 +144,7 @@ function dependencyPlan(call: NodePath<t.CallExpression>, fn: InlinableFunction)
 			if (callerBinding) return;
 			continue;
 		}
+		if (!binding.constant || reassignedImport(binding)) changing.push(name);
 		if (sameBinding(callerBinding, binding)) continue;
 		if (!callerFile || !binding.scope.path.isProgram()) return;
 		// Imported bindings cannot represent writes to a callee module's local variable.
@@ -197,7 +200,9 @@ function dependencyPlan(call: NodePath<t.CallExpression>, fn: InlinableFunction)
 		imports.push(declaration);
 		names.set(name, local.name);
 	}
-	return { names, imports };
+	// Outer variables the body reads that can change value, by their name in the caller.
+	const mutable = new Set(changing.map((name) => names.get(name) ?? name));
+	return { names, imports, mutable };
 }
 
 /** Clone a complete function scope so Babel can rename bindings, including destructured locals. */
@@ -270,7 +275,7 @@ export function prepareInlineFunction(
 	// Unwrapping TypeScript nodes can detach the reference paths collected during
 	// renaming. Substitution must use references in the final runtime tree.
 	functionPath.scope.crawl();
-	return { functionPath, imports: dependencies.imports };
+	return { functionPath, imports: dependencies.imports, mutable: dependencies.mutable };
 }
 
 /** A value-stable argument can be substituted without repeating effects or changing a snapshot. */
@@ -278,7 +283,8 @@ export function stableArgument(
 	node: t.Expression,
 	call: NodePath<t.CallExpression>,
 	initializedSnapshots?: WeakSet<t.Identifier>,
-	loweredParameters?: WeakSet<t.Identifier>
+	loweredParameters?: WeakSet<t.Identifier>,
+	settled?: WeakSet<t.Identifier>
 ): boolean {
 	if (
 		t.isNumericLiteral(node) ||
@@ -295,12 +301,14 @@ export function stableArgument(
 	// A lowered parameter is assigned once, ahead of every use inside its expression.
 	const lowered =
 		loweredParameters?.has(binding.identifier) && binding.constantViolations.length <= 1;
-	if (!binding.constant && !lowered) return false;
+	// A settled variable is written only by the statements that produce it, ahead of every read.
+	const written = settled?.has(binding.identifier);
+	if (!binding.constant && !lowered && !written) return false;
 	// A call inside a parameter initializer can precede initialization of later parameters.
 	if (!call.findParent((path) => path === owner.get('body'))) return false;
 	// Invocation snapshots are initialized before entering their cloned body,
 	// including nested inline sites whose generated declarations have no source loc.
-	if (lowered || initializedSnapshots?.has(binding.identifier)) return true;
+	if (lowered || written || initializedSnapshots?.has(binding.identifier)) return true;
 	if (binding.kind === 'param') return true;
 	return (
 		binding.kind === 'const' &&

@@ -1,5 +1,6 @@
 import { NodePath, Scope } from '@babel/traverse';
 import * as t from '@babel/types';
+import { reassignedImport, resolveCall } from '../collect-metadata';
 
 /** The statement containing an expression, unless a function or class boundary comes first. */
 export function enclosingStatement(path: NodePath): NodePath<t.Statement> | undefined {
@@ -46,44 +47,46 @@ export function unnamed(value: t.Expression) {
 	return anonymous ? t.sequenceExpression([t.numericLiteral(0), value]) : value;
 }
 
-/** Whether evaluating a node runs nothing that could write state, apart from one given call. */
-export function effectFree(node: t.Node, except?: t.Node) {
-	let free = true;
-	t.traverseFast(node, (child) => {
-		if (child === except) return;
-		if (
-			t.isCallExpression(child) ||
-			t.isOptionalCallExpression(child) ||
-			t.isNewExpression(child) ||
-			t.isTaggedTemplateExpression(child) ||
-			t.isAssignmentExpression(child) ||
-			t.isUpdateExpression(child) ||
-			t.isUnaryExpression(child, { operator: 'delete' }) ||
-			t.isAwaitExpression(child) ||
-			t.isYieldExpression(child)
-		)
-			free = false;
-	});
-	return free;
-}
-
-/** A variable only its own function can write, so code from elsewhere cannot change it. */
-function privateLocal(scope: Scope, name: string) {
-	const binding = scope.getBinding(name);
-	const owner = binding?.scope.getFunctionParent();
-	if (!binding || !owner) return false;
-	return [...binding.referencePaths, ...binding.constantViolations].every(
-		(path) => path.scope.getFunctionParent() === owner
+function effectful(path: NodePath) {
+	// A call to a pure function only runs its arguments, which are visited on their own.
+	if (path.isCallExpression()) return !resolveCall(path)?.pure;
+	return (
+		path.isOptionalCallExpression() ||
+		path.isNewExpression() ||
+		path.isTaggedTemplateExpression() ||
+		path.isAssignmentExpression() ||
+		path.isUpdateExpression() ||
+		path.isUnaryExpression({ operator: 'delete' }) ||
+		path.isAwaitExpression() ||
+		path.isYieldExpression()
 	);
 }
 
-/** A callee a pure body cannot change between hoisted evaluation and the call. */
-function stableCallee(callee: t.Node) {
-	if (t.isIdentifier(callee)) return true;
+/** Whether evaluating an expression runs nothing that could write state or suspend. */
+export function effectFree(path: NodePath) {
+	let free = !effectful(path);
+	if (free)
+		path.traverse({
+			enter(child) {
+				if (!effectful(child)) return;
+				free = false;
+				child.stop();
+			},
+		});
+	return free;
+}
+
+export function logicalAssignmentOperator(operator: string) {
+	return operator === '&&=' || operator === '||=' || operator === '??=';
+}
+
+/** A reference that reads the same when evaluated a second time with nothing in between. */
+export function repeatable(target: t.Node) {
+	if (t.isIdentifier(target)) return true;
 	return (
-		t.isMemberExpression(callee) &&
-		!callee.computed &&
-		(t.isIdentifier(callee.object) || t.isThisExpression(callee.object))
+		t.isMemberExpression(target) &&
+		(t.isIdentifier(target.object) || t.isThisExpression(target.object)) &&
+		(!target.computed || t.isIdentifier(target.property) || constantValue(target.property))
 	);
 }
 
@@ -92,9 +95,9 @@ function fixedCallee(callee: t.Node, scope: Scope, pure: boolean) {
 	if (t.isIdentifier(callee)) {
 		if (pure) return true;
 		const binding = scope.getBinding(callee.name);
-		return Boolean(binding?.constant);
+		return Boolean(binding?.constant) && !reassignedImport(binding!);
 	}
-	return pure && stableCallee(callee);
+	return pure && repeatable(callee) && !(callee as t.MemberExpression).computed;
 }
 
 export interface Hoist {
@@ -160,15 +163,10 @@ function precedingOperands(
 	if (parent.isAssignmentExpression() && key === 'right') {
 		const { left, operator } = parent.node;
 		// A logical assignment evaluates its right side on some paths only.
-		if (operator === '&&=' || operator === '||=' || operator === '??=') return undefined;
-		// A compound assignment reads its target first, so nothing that could write the
-		// target may run ahead of that read.
-		if (
-			operator !== '=' &&
-			!pure &&
-			!(t.isIdentifier(left) && privateLocal(parent.scope, left.name))
-		)
-			return undefined;
+		if (logicalAssignmentOperator(operator)) return undefined;
+		// A compound assignment reads its target first, so nothing with effects may run
+		// ahead of that read.
+		if (operator !== '=' && !pure) return undefined;
 		if (t.isIdentifier(left)) return [];
 		if (t.isMemberExpression(left))
 			return left.computed ? [left.object, left.property] : [left.object];
@@ -225,7 +223,7 @@ export function hoistLevel(
 	stable: (node: t.Expression) => boolean
 ): Level | undefined {
 	let spills = spillsAt(child, pure, stable);
-	if (pure && spills?.some((operand) => !effectFree(operand.node))) {
+	if (pure && spills?.some((operand) => !effectFree(operand))) {
 		pure = false;
 		spills = spillsAt(child, false, stable);
 	}
@@ -258,7 +256,7 @@ export function hoistAnchor(
 
 /** Move the operands a hoist must evaluate early into constants, in evaluation order. */
 export function spillOperands(hoist: Hoist, snapshots: WeakSet<t.Identifier>) {
-	const statements: t.Statement[] = [];
+	const statements: t.VariableDeclaration[] = [];
 	for (const operand of hoist.spills) {
 		const id = operand.scope.generateUidIdentifier('operand');
 		snapshots.add(id);
@@ -266,6 +264,15 @@ export function spillOperands(hoist: Hoist, snapshots: WeakSet<t.Identifier>) {
 		operand.replaceWith(t.cloneNode(id));
 	}
 	return statements;
+}
+
+/**
+ * Make the leading declarations among inserted statements known to their scope, so that
+ * later expansions can leave reads of them in place instead of copying them again.
+ */
+export function registerDeclarations(inserted: NodePath[], count: number) {
+	for (const path of inserted.slice(0, count))
+		if (path.isVariableDeclaration()) path.scope.registerDeclaration(path);
 }
 
 function findChild(parent: NodePath, node: t.Node): NodePath<t.Expression> | undefined {

@@ -4,8 +4,14 @@ import * as t from '@babel/types';
 /**
  * Walk a body in evaluation order, recording parameter reads, until the first operation
  * that could run user code or branch. Returns false once that operation is reached.
+ * A read of an outer variable that can change is recorded as an empty name.
  */
-function createWalker(names: Set<string>, reads: string[], nested: Set<string>) {
+function createWalker(
+	names: Set<string>,
+	reads: string[],
+	nested: Set<string>,
+	mutable: Set<string>
+) {
 	function all(nodes: (t.Node | null | undefined)[]): boolean {
 		for (const node of nodes) if (node && !walk(node)) return false;
 		return true;
@@ -13,6 +19,7 @@ function createWalker(names: Set<string>, reads: string[], nested: Set<string>) 
 	function walk(node: t.Node): boolean {
 		if (t.isIdentifier(node)) {
 			if (names.has(node.name)) reads.push(node.name);
+			else if (mutable.has(node.name)) reads.push('');
 			return true;
 		}
 		if (t.isLiteral(node) && !t.isTemplateLiteral(node)) return true;
@@ -85,25 +92,28 @@ function createWalker(names: Set<string>, reads: string[], nested: Set<string>) 
  * Parameters whose argument can be read at the parameter's single use instead of a
  * snapshot. Stable arguments qualify anywhere. Effectful arguments qualify as a suffix
  * of the parameter list when their uses lead the body, in parameter order, ahead of any
- * operation that could observe them.
+ * operation that could observe them and of any read their effects could change.
  */
 export function planSubstitutions(
 	body: t.Statement[],
 	params: t.Identifier[],
 	bindings: Binding[],
 	stable: boolean[],
-	surplus: boolean
+	surplus: boolean,
+	mutable: Set<string>
 ): Set<number> {
 	const plan = new Set<number>();
 	const names = new Set(params.map((param) => param.name));
 	const reads: string[] = [];
 	const nested = new Set<string>();
-	createWalker(names, reads, nested)(body);
+	createWalker(names, reads, nested, mutable)(body);
+	const changing = reads.indexOf('');
 	const candidates = params.map((param, index) => {
 		const binding = bindings[index];
 		if (!binding.constant) return false;
 		if (stable[index]) return true;
 		if (surplus || nested.has(param.name) || binding.referencePaths.length !== 1) return false;
+		if (changing !== -1 && reads.indexOf(param.name) > changing) return false;
 		return reads.filter((name) => name === param.name).length === 1;
 	});
 	const effectful = params.map((_, index) => index).filter((index) => !stable[index]);

@@ -10,12 +10,14 @@ import { STATS } from './stats';
 import { getBabelDefaultExport } from './utils/babel-exports';
 import {
 	enclosingStatement,
+	effectFree,
 	hoistAnchor,
 	insertBeforeStatement,
+	registerDeclarations,
 	spillOperands,
 	unnamed,
 } from './utils/call-position';
-import { flattenBranch } from './utils/flatten-branch';
+import { flattenBranch, Flattening } from './utils/flatten-branch';
 import { hasInlineDecorator, removeDecorators } from './utils/decorator-utils';
 import { getFunctionName } from './utils/get-function-name';
 import { planSubstitutions } from './utils/argument-plan';
@@ -122,6 +124,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 	const loweredParameters = new WeakSet<t.Identifier>();
 	const flatExpansions = new Map<string, boolean>();
 	const branchResults = new WeakMap<t.Node, boolean>();
+	const settled = new WeakSet<t.Identifier>();
 	// Scope crawls discard UID reservations for labels in nested blocks. Keep an
 	// independent reservation set for the lifetime of this module's transformation.
 	const labels = new Set<string>();
@@ -194,7 +197,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					newLabel(path.scope, name)
 				);
 				if (!prepared) return;
-				const { functionPath, imports } = prepared;
+				const { functionPath, imports, mutable } = prepared;
 				const original = path.node;
 				const next = new Set([...parents, fn.key]);
 				const args = original.arguments as t.Expression[];
@@ -205,11 +208,11 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				// Sequences preserve GetValue semantics (receivers, indirect eval, delete, names).
 				const bindings = params.map((param) => functionPath.scope.getBinding(param.name)!);
 				const stable = args.map((argument) =>
-					stableArgument(argument, path, initializedSnapshots, loweredParameters)
+					stableArgument(argument, path, initializedSnapshots, loweredParameters, settled)
 				);
 				for (let index = args.length; index < params.length; index++) stable.push(true);
 				const surplus = args.slice(params.length).some((argument) => !trivial(argument));
-				const plan = planSubstitutions(body.body, params, bindings, stable, surplus);
+				const plan = planSubstitutions(body.body, params, bindings, stable, surplus, mutable);
 				for (const index of plan) {
 					const argument = args[index];
 					for (const reference of bindings[index].referencePaths) {
@@ -324,9 +327,16 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				// When the call is unconditional, earlier operands move into temporaries and
 				// the body runs just ahead of the statement.
 				const unused = parent.isExpressionStatement();
-				const settled = (node: t.Expression) =>
-					stableArgument(node, path, initializedSnapshots, loweredParameters);
-				const hoist = unused ? undefined : hoistAnchor(path, fn.pure, settled);
+				const context: Flattening = {
+					stable: (node) =>
+						stableArgument(node, path, initializedSnapshots, loweredParameters, settled),
+					snapshots: initializedSnapshots,
+					settled,
+					results: branchResults,
+				};
+				// The arguments run ahead with the body, so their effects count as its own.
+				const pure = fn.pure && effectFree(path);
+				const hoist = unused ? undefined : hoistAnchor(path, pure, context.stable);
 				if (!unused && !hoist) {
 					// Straight-line bodies become one expression in place, with hoisted block bindings.
 					let closures = false;
@@ -359,7 +369,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					// Any other body needs statements. The enclosing branch or loop test becomes
 					// statements and the next walk expands the call there. Wrapping the body in a
 					// function would allocate on every pass, so with no statement form the call stays.
-					if (flattenBranch(path, fn.pure, settled, initializedSnapshots, branchResults))
+					if (flattenBranch(path, pure, context))
 						flattened.add((parentFunction ?? path.scope.getProgramParent().path).node);
 					return;
 				}
@@ -425,7 +435,10 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					path.replaceWith(expression);
 					const spilled = spillOperands(hoist, initializedSnapshots);
 					if (statements.length || spilled.length)
-						insertBeforeStatement(anchor, [...spilled, ...statements]);
+						registerDeclarations(
+							insertBeforeStatement(anchor, [...spilled, ...statements]),
+							spilled.length
+						);
 					return;
 				}
 
@@ -465,21 +478,32 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				) {
 					const id = declarator.node.id;
 					const statements = frame(id);
-					declaration.replaceWithMultiple([
-						...spillOperands(hoist, initializedSnapshots),
-						t.variableDeclaration('let', [t.variableDeclarator(t.cloneNode(id))]),
-						...statements,
-					]);
+					const spilled = spillOperands(hoist, initializedSnapshots);
+					registerDeclarations(
+						declaration.replaceWithMultiple([
+							...spilled,
+							t.variableDeclaration('let', [t.variableDeclarator(t.cloneNode(id))]),
+							...statements,
+						]),
+						spilled.length
+					);
 					return;
 				}
 				const result = path.scope.generateUidIdentifier('result');
 				const statements = frame(result);
 				path.replaceWith(t.cloneNode(result));
-				insertBeforeStatement(anchor, [
-					...spillOperands(hoist, initializedSnapshots),
-					t.variableDeclaration('let', [t.variableDeclarator(t.cloneNode(result))]),
-					...statements,
-				]);
+				const spilled = spillOperands(hoist, initializedSnapshots);
+				// The frame writes the result ahead of its one read, so later expansions
+				// can leave that read in place.
+				settled.add(result);
+				registerDeclarations(
+					insertBeforeStatement(anchor, [
+						...spilled,
+						t.variableDeclaration('let', [t.variableDeclarator(result)]),
+						...statements,
+					]),
+					spilled.length + 1
+				);
 			},
 		},
 	};

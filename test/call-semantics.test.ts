@@ -472,6 +472,10 @@ const flattenedCases: { name: string; source: string; inlined?: string }[] = [
 		name: 'arguments that yield',
 		source: `${any} function* each() { const a = any([yield 1]); const b = a ? any([yield 2]) : any([yield 3]); return [a, b]; } function run() { const first = each(); const second = each(); return [first.next(), first.next(1), first.next(0), second.next(), second.next(0), second.next(4)]; }`,
 	},
+	{
+		name: 'a branch whose body writes a compound assignment target',
+		source: 'let total = 1; /* @inline */ function any(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; total += total ? any(1) : 0; return total; }',
+	},
 ];
 
 // Positions with no statement form. The call stays rather than run inside a function.
@@ -499,10 +503,6 @@ const keptCases = [
 	{
 		name: 'a parameter default',
 		source: `${any} function run() { function read(found = any([0, 1])) { return found; } return [read(), read(0)]; }`,
-	},
-	{
-		name: 'a branch whose body writes a compound assignment target',
-		source: 'let total = 1; /* @inline */ function any(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; total += total ? any(1) : 0; return total; }',
 	},
 ];
 
@@ -576,15 +576,123 @@ const orderCases = [
 		name: 'a callee swapped by the body',
 		source: 'let f = (x) => x; /* @inline */ function swap(xs) { for (const x of xs) f = (y) => [y, x]; return 1; } function run() { f = (x) => x; return f(swap([1])); }',
 	},
+	{
+		name: 'a compound target written by an argument of a pure call',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { let v = 1; const cap = () => v; v += psum(v++, 0); return [v, cap()]; }',
+	},
+	{
+		name: 'a callee swapped by an argument of a pure call',
+		source: "/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { let g = (x) => ['old', x]; return g(psum((g = (x) => ['new', x], 1), 0)); }",
+	},
+	{
+		name: 'a method swapped by an argument of a pure call',
+		source: "/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { const o = { m: (x) => ['old', x] }; return o.m(psum((o.m = (x) => ['new', x], 1), 0)); }",
+	},
+	{
+		name: 'a callee swapped while an argument of a pure call awaits',
+		source: "/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } async function run() { let g = (x) => ['old', x]; const p = Promise.resolve().then(() => { g = (x) => ['new', x]; return 1; }); return g(psum(await p, 0)); }",
+	},
+	{
+		name: 'a member target changed while an argument of a pure call awaits',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } class S { n = 1; async add(p) { this.n += psum(await p, 0); return this.n; } } async function run() { const s = new S(); const p = Promise.resolve().then(() => { s.n = 100; return 1; }); return s.add(p); }',
+	},
+	{
+		name: 'a compound target changed while an argument of a pure call yields',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } let total; function* gen() { total += psum(yield 1, 0); return total; } function run() { total = 1; const it = gen(); it.next(); total = 100; return it.next(1).value; }',
+	},
+	{
+		name: 'an outer variable changed while an argument awaits',
+		source: 'let total = 0; /* @inline */ function add(d) { return total + d; } async function run() { total = 1; const p = Promise.resolve().then(() => { total = 100; return 5; }); total = add(await p); return total; }',
+	},
+	{
+		name: 'an outer variable changed while an argument yields',
+		source: 'let total = 0; /* @inline */ function add(d) { return total + d; } function* gen() { return add(yield 1); } function run() { total = 1; const it = gen(); it.next(); total = 100; return it.next(5).value; }',
+	},
+	{
+		name: 'an outer variable changed by an argument',
+		source: 'let total = 0; function bump() { total = 100; return 5; } /* @inline */ function add(d) { return total + d; } function run() { total = 1; return add(bump()); }',
+	},
+	{
+		name: 'a local compound target written by an argument',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; v += imp(v++); return [v]; }',
+	},
+	{
+		name: 'a local compound target written by the other arm of a branch',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; const c = [].length; v += c ? imp(1) : v++; return [v]; }',
+	},
+	{
+		name: 'a local compound target written by the test of a branch',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; v += v++ ? imp(1) : 0; return [v]; }',
+	},
+	{
+		name: 'a local compound target written by the left of a logical branch',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let v = 1; v += (v = 7) && imp(1); return [v]; }',
+	},
+	{
+		name: 'a local compound target written by a branch test around a pure call',
+		source: '/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { let v = 1; v += v++ ? psum(1, 0) : 0; return [v]; }',
+	},
+	{
+		name: 'a local compound target written by a class field the body runs',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } /* @inline */ function make(C) { for (let i = 0; i < 2; i++) new C(); return 100; } function run() { let v = 1; class C { n = v++; } v += make(C); return [v]; }',
+	},
+	{
+		name: 'a compound assignment to a member',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { const o = { n: 1 }; o.n += imp(1); return o.n; }',
+	},
+	{
+		name: 'a compound assignment to a member of this',
+		source: 'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } class C { n = 1; add(x) { this.n += imp(x); return this.n; } } function run() { return new C().add(2); }',
+	},
 ];
 
 describe('branch positions', () => {
 	it.each(orderCases)('keeps the order of $name', async ({ source }) => {
-		const result = await compareBuilds({
-			'main.js': `${source}
-export {run};`,
-		});
-		expect(result.code).not.toContain('(() => {');
+		await compareBuilds({ 'main.js': `${source}\nexport {run};` });
+	});
+
+	it('expands a body into a compound assignment inside another expanded body', async () => {
+		await compareBuilds(
+			{
+				'main.js':
+					'const log = []; /* @inline */ function weight(x) { for (let i = 0; i < 1; i++) log.push(x); return x * 2; } function run() { const r = sum([1, 2]); return [r, log.length]; } /* @inline */ function sum(xs) { let total = 0; for (const x of xs) total += weight(x); return total; }\nexport {run};',
+			},
+			'weight'
+		);
+	});
+
+	it('expands pure calls on both arms of a branch passed to a method', async () => {
+		await compareBuilds(
+			{
+				'main.js':
+					'/* @inline @pure */ function psum(a, b) { let s = 0; for (let i = 0; i < 2; i++) s += a; if (s > 100) return s; return s + b; } function run() { const o = { m: (x) => [x] }; const c = [1].length; return o.m(c ? psum(1, 0) : psum(2, 0)); }\nexport {run};',
+			},
+			'psum'
+		);
+	});
+
+	it('reads a spilled callee in place when a second body runs ahead of the call', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js':
+					'const log = []; /* @inline */ function imp(a) { for (let i = 0; i < 1; i++) log.push(a); if (a > 100) return a; return a * 10; } function run() { let g = (a, b) => [a, b]; const set = () => { g = null; }; return g(imp(1), imp(2)); }\nexport {run};',
+			},
+			'imp'
+		);
+		const caller = result.code.slice(result.code.indexOf('function run('));
+		expect(caller.match(/\bconst _operand\d* = /g)).toHaveLength(1);
+	});
+
+	it('reads an imported callee before a body that makes its module assign it again', async () => {
+		await compareBuilds(
+			{
+				'lib.js':
+					"export let handler = (x) => ['old', x]; export function install() { handler = (x) => ['new', x]; } export /* @inline */ function step(n) { for (let i = 0; i < n; i++) install(); return 1; }",
+				'main.js':
+					"import {handler, step} from './lib.js'; export function run() { return handler(step(1)); }",
+			},
+			'step'
+		);
 	});
 
 	it('expands a body into a compound assignment to a variable only the caller can write', async () => {

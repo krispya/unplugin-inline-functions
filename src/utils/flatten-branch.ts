@@ -6,31 +6,32 @@ import {
 	hoistAnchor,
 	hoistLevel,
 	insertBeforeStatement,
+	logicalAssignmentOperator,
+	registerDeclarations,
+	repeatable,
 	spillOperands,
 	transparent,
 	unnamed,
 } from './call-position';
 
-type Stable = (node: t.Expression) => boolean;
 type Branch = NodePath<t.LogicalExpression> | NodePath<t.ConditionalExpression>;
+type Assignment = NodePath<t.AssignmentExpression>;
 type TestedLoop = NodePath<t.WhileStatement> | NodePath<t.ForStatement>;
 
-type LogicalAssignment = NodePath<t.AssignmentExpression>;
+export interface Flattening {
+	stable: (node: t.Expression) => boolean;
+	/** Constants that hold an operand evaluated ahead of its statement. */
+	snapshots: WeakSet<t.Identifier>;
+	/** Variables written only by the statements that produce them, ahead of every read. */
+	settled: WeakSet<t.Identifier>;
+	/** Each generated assignment, with whether its target already holds another value. */
+	results: WeakMap<t.Node, boolean>;
+}
 
-/**
- * A logical assignment whose target reads the same on a second evaluation, so that
- * a ??= b can be written a ?? (a = b).
- */
-function logicalAssignment(path: NodePath): path is LogicalAssignment {
-	if (!path.isAssignmentExpression()) return false;
-	const { left, operator } = path.node;
-	if (operator !== '&&=' && operator !== '||=' && operator !== '??=') return false;
-	return (
-		t.isIdentifier(left) ||
-		(t.isMemberExpression(left) &&
-			!left.computed &&
-			(t.isIdentifier(left.object) || t.isThisExpression(left.object)))
-	);
+/** An assignment with an operator whose target can be read again, so it can be spelled out. */
+function spelledOut(path: NodePath, logical: boolean): path is Assignment {
+	if (!path.isAssignmentExpression() || path.node.operator === '=') return false;
+	return logicalAssignmentOperator(path.node.operator) === logical && repeatable(path.node.left);
 }
 
 /** An operand that only some paths through its parent expression evaluate. */
@@ -39,19 +40,27 @@ function inBranch(child: NodePath) {
 	return (
 		(parent.isLogicalExpression() && child.key === 'right') ||
 		(parent.isConditionalExpression() && child.key !== 'test') ||
-		(logicalAssignment(parent) && child.key === 'right')
+		(spelledOut(parent, true) && child.key === 'right')
 	);
 }
 
-/** Spell a logical assignment as the logical expression it stands for. */
-function expandLogicalAssignment(assignment: LogicalAssignment) {
+/** Spell a ??= b as a ?? (a = b), and a += b as a = a + b. */
+function spellOut(assignment: Assignment) {
 	const { left, operator, right } = assignment.node;
+	const read = t.cloneNode(left) as t.Expression;
+	const plain = operator.slice(0, -1);
 	assignment.replaceWith(
-		t.logicalExpression(
-			operator.slice(0, -1) as t.LogicalExpression['operator'],
-			t.cloneNode(left) as t.Expression,
-			t.assignmentExpression('=', left, right)
-		)
+		logicalAssignmentOperator(operator)
+			? t.logicalExpression(
+					plain as t.LogicalExpression['operator'],
+					read,
+					t.assignmentExpression('=', left, right)
+				)
+			: t.assignmentExpression(
+					'=',
+					left,
+					t.binaryExpression(plain as t.BinaryExpression['operator'], read, right)
+				)
 	);
 }
 
@@ -68,24 +77,39 @@ function continues(operator: t.LogicalExpression['operator'], left: t.Expression
 	return t.binaryExpression('==', left, t.nullLiteral());
 }
 
-/** Whether statements can stand in for every branch and loop test between a call and its statement. */
-function flattens(call: NodePath, pure: boolean, stable: Stable) {
+interface Steps {
+	/** A compound assignment that must read its target ahead of what moves. */
+	compound?: Assignment;
+	/** The outermost branch around the call. */
+	outer?: Branch | Assignment;
+	loop?: TestedLoop;
+}
+
+/**
+ * The rewrites that leave a call where its body can run in place, or undefined when
+ * some position between the call and its statement has no statement form.
+ */
+function plan(call: NodePath, pure: boolean, stable: Flattening['stable']): Steps | undefined {
+	const steps: Steps = {};
 	let current = call;
 	let ahead = pure;
 	while (current.parentPath) {
-		if (inLoopTest(current)) return true;
+		const parent = current.parentPath;
+		if (inLoopTest(current)) return { ...steps, loop: parent as TestedLoop };
 		if (inBranch(current)) {
+			steps.outer = parent as Branch | Assignment;
 			// A lifted branch moves whole, so its other operands run ahead with the body.
-			ahead = pure && effectFree(current.parentPath.node, call.node);
+			ahead = pure && effectFree(parent);
 		} else {
 			const level = hoistLevel(current, ahead, stable);
-			if (!level) return false;
-			ahead = level.pure;
+			if (level) ahead = level.pure;
+			else if (current.key === 'right' && spelledOut(parent, false)) steps.compound ??= parent;
+			else return;
 		}
-		if (current.parentPath.isStatement()) return true;
-		current = current.parentPath;
+		if (parent.isStatement()) return steps;
+		current = parent;
 	}
-	return false;
+	return;
 }
 
 function conjuncts(test: t.Expression): t.Expression[] {
@@ -126,14 +150,8 @@ function assign(
 }
 
 /** Replace a conditional or logical expression with an if statement that produces its value. */
-function liftBranch(
-	branch: Branch,
-	call: NodePath,
-	pure: boolean,
-	stable: Stable,
-	snapshots: WeakSet<t.Identifier>,
-	results: WeakMap<t.Node, boolean>
-) {
+function liftBranch(branch: Branch, pure: boolean, context: Flattening) {
+	const { stable, snapshots, settled, results } = context;
 	let host: NodePath = branch;
 	while (transparent(host.parentPath!)) host = host.parentPath!;
 	const parent = host.parentPath!;
@@ -204,7 +222,7 @@ function liftBranch(
 	}
 
 	// The whole branch moves ahead of the statement, so its other operands count as well.
-	const hoist = hoistAnchor(branch, pure && effectFree(branch.node, call.node), stable);
+	const hoist = hoistAnchor(branch, pure && effectFree(branch), stable);
 	if (!hoist) return false;
 	const anchor = hoist.anchor;
 
@@ -241,43 +259,29 @@ function liftBranch(
 	const variable = t.variableDeclaration('let', [t.variableDeclarator(target, initial)]);
 	const spilled = spillOperands(hoist, snapshots);
 	if (declared) {
-		declaration!.replaceWithMultiple([...spilled, variable, statement]);
+		const inserted = declaration!.replaceWithMultiple([...spilled, variable, statement]);
+		registerDeclarations(inserted, spilled.length);
 		return true;
 	}
 	branch.replaceWith(t.identifier(target.name));
+	settled.add(target);
 	const inserted = insertBeforeStatement(anchor, [...spilled, variable, statement]);
-	const binding = inserted[spilled.length];
-	binding.scope.registerDeclaration(binding);
+	registerDeclarations(inserted, spilled.length + 1);
 	return true;
 }
 
 /**
- * Rewrite the outermost branch or loop test around a call as statements, so that a
- * later visit finds the call where its body can run in place. Returns false, leaving
- * the code untouched, when no statement form reaches the call.
+ * Make one rewrite toward a call whose body needs statements, so that a later visit
+ * finds the call where the body can run in place. Returns false, leaving the code
+ * untouched, when no statement form reaches the call.
  */
-export function flattenBranch(
-	call: NodePath<t.CallExpression>,
-	pure: boolean,
-	stable: Stable,
-	snapshots: WeakSet<t.Identifier>,
-	results: WeakMap<t.Node, boolean>
-) {
-	if (!flattens(call, pure, stable)) return false;
-	let outer: Branch | LogicalAssignment | undefined;
-	let current: NodePath = call;
-	while (!current.parentPath!.isStatement()) {
-		if (inBranch(current)) outer = current.parentPath as Branch | LogicalAssignment;
-		current = current.parentPath!;
-	}
-	if (inLoopTest(current)) {
-		openLoopTest(current.parentPath as TestedLoop);
-		return true;
-	}
-	if (!outer) return false;
-	if (outer.isAssignmentExpression()) {
-		expandLogicalAssignment(outer);
-		return true;
-	}
-	return liftBranch(outer as Branch, call, pure, stable, snapshots, results);
+export function flattenBranch(call: NodePath<t.CallExpression>, pure: boolean, context: Flattening) {
+	const steps = plan(call, pure, context.stable);
+	if (!steps) return false;
+	if (steps.compound) spellOut(steps.compound);
+	else if (steps.loop) openLoopTest(steps.loop);
+	else if (!steps.outer) return false;
+	else if (steps.outer.isAssignmentExpression()) spellOut(steps.outer);
+	else return liftBranch(steps.outer as Branch, pure, context);
+	return true;
 }
