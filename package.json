@@ -82,6 +82,7 @@
 	"dependencies": {
 		"@babel/generator": "^7.28.5",
 		"fast-glob": "^3.3.3",
+		"magic-string": "^0.30.21",
 		"unplugin": "^2.3.11"
 	},
 	"engines": {

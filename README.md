@@ -175,6 +175,14 @@ The plugin accepts the following options:
   outlineThrows?: boolean;
 
   /**
+   * Export an alias of each binding a chunk exports, so the chunk's own reads of the
+   * binding fold into optimized code. See "Exported bindings" below.
+   *
+   * @default true
+   */
+  decoupleExports?: boolean;
+
+  /**
    * Automatically discover files via `export * from` and `export { ... } from` statements.
    * When enabled, files matching the include pattern will be scanned for export statements,
    * and the referenced files will be automatically included in metadata collection.
@@ -415,6 +423,21 @@ export function set(ctx, entity, trait, value) {
   // hot path
 }
 ```
+
+## Exported bindings
+
+V8 keeps a binding that a chunk exports in a module cell and loads that cell on every use, even inside the chunk. An unexported binding that never changes folds into optimized code instead. The plugin exports an alias, so the chunk's own reads stay on the binding that folds:
+
+```js
+const key = Symbol('key');
+function read(object) {
+    return object[key]; // a constant once optimized
+}
+const key$export = key;
+export { key$export as key, read };
+```
+
+Importers get the same value under the same name. Bindings that are assigned again keep their live export. This runs on ES module chunks from Rollup, Vite and Rolldown, and skips a chunk that imports another chunk, where an import cycle could read an export before the alias exists. Turn it off with `decoupleExports: false`.
 
 ## But why? 
 

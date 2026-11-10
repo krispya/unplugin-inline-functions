@@ -21,6 +21,7 @@ export default defineConfig({
 			'@babel/types',
 			'unplugin',
 			'fast-glob',
+			'magic-string',
 		],
 		dts: {
 			neverBundle: true,
