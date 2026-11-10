@@ -25,6 +25,7 @@ import { lowerToExpression } from './utils/lower-to-expression';
 import { hasColdAnnotation, outlineCold } from './outline-cold';
 import { isTerminal, restructureReturns, terminates } from './utils/restructure-returns';
 import {
+	expandable,
 	localizeVars,
 	prepareInlineFunction,
 	stableArgument,
@@ -101,6 +102,19 @@ function trivial(node: t.Expression | null | undefined) {
 	);
 }
 
+/** Whether a path still leads up to the program, which moving an ancestor's code breaks. */
+function attached(path: NodePath) {
+	let current = path;
+	while (current.parentPath) {
+		const parent = current.parentPath.node as unknown as Record<string, unknown>;
+		const holder = (current.listKey ? parent[current.listKey] : parent) as
+			Record<string | number, unknown> | undefined;
+		if (!holder || holder[current.key as string | number] !== current.node) return false;
+		current = current.parentPath;
+	}
+	return current.isProgram();
+}
+
 export interface Expansion {
 	key: string;
 	name: string;
@@ -164,11 +178,16 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 		},
 	});
 	// Flattening a branch moves code that this walk has yet to reach. The rest of that
-	// function waits for the next walk, which meets the call where its body can run in place.
+	// function waits, and the function is walked again on its own to meet the call where
+	// its body can run in place.
 	const flattened = new Set<t.Node>();
+	const pending = new Set<NodePath>();
+	// A call that cannot expand stays that way, so later walks pass over it.
+	const kept = new WeakSet<t.Node>();
 	const visitor: Visitor = {
 		CallExpression: {
 			exit(path) {
+				if (kept.has(path.node)) return;
 				if (flattened.size && path.findParent((ancestor) => flattened.has(ancestor.node)))
 					return;
 				const fn = resolveCall(path);
@@ -193,10 +212,47 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				if (!calleeInitialized(path, fn)) return;
 				const parentFunction = path.getFunctionParent();
 				if (parentFunction && options.skip?.(parentFunction.node, fn.key)) return;
+				const context: Flattening = {
+					stable: (node) =>
+						stableArgument(node, path, initializedSnapshots, loweredParameters, settled),
+					snapshots: initializedSnapshots,
+					settled,
+					results: branchResults,
+				};
+				// The arguments run ahead with the body, so their effects count as its own.
+				const pure = fn.pure && effectFree(path);
+				const flatten = () => {
+					if (flattenBranch(path, pure, context)) {
+						const owner = parentFunction ?? path.scope.getProgramParent().path;
+						flattened.add(owner.node);
+						pending.add(owner);
+					} else kept.add(path.node);
+				};
+				// A body that can never be one expression needs a statement position. With
+				// none here, the rewrite toward one comes before any work on the body.
+				const source = fn.func.body;
+				const oneReturn =
+					!t.isBlockStatement(source) ||
+					(source.body.length === 1 && t.isReturnStatement(source.body[0]));
+				const site = path.parentPath;
+				if (
+					!oneReturn &&
+					!site.isReturnStatement() &&
+					!site.isExpressionStatement() &&
+					!expandsFlat(fn, flatExpansions) &&
+					!hoistAnchor(path, pure, context.stable)
+				) {
+					if (expandable(path, fn)) flatten();
+					else kept.add(path.node);
+					return;
+				}
 				const prepared = prepareInlineFunction(path, fn, (name) =>
 					newLabel(path.scope, name)
 				);
-				if (!prepared) return;
+				if (!prepared) {
+					kept.add(path.node);
+					return;
+				}
 				const { functionPath, imports, mutable } = prepared;
 				const original = path.node;
 				const next = new Set([...parents, fn.key]);
@@ -327,15 +383,6 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				// When the call is unconditional, earlier operands move into temporaries and
 				// the body runs just ahead of the statement.
 				const unused = parent.isExpressionStatement();
-				const context: Flattening = {
-					stable: (node) =>
-						stableArgument(node, path, initializedSnapshots, loweredParameters, settled),
-					snapshots: initializedSnapshots,
-					settled,
-					results: branchResults,
-				};
-				// The arguments run ahead with the body, so their effects count as its own.
-				const pure = fn.pure && effectFree(path);
 				const hoist = unused ? undefined : hoistAnchor(path, pure, context.stable);
 				if (!unused && !hoist) {
 					// Straight-line bodies become one expression in place, with hoisted block bindings.
@@ -369,8 +416,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					// Any other body needs statements. The enclosing branch or loop test becomes
 					// statements and the next walk expands the call there. Wrapping the body in a
 					// function would allocate on every pass, so with no statement form the call stays.
-					if (flattenBranch(path, pure, context))
-						flattened.add((parentFunction ?? path.scope.getProgramParent().path).node);
+					flatten();
 					return;
 				}
 				commit();
@@ -507,10 +553,21 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 			},
 		},
 	};
-	do {
+	traverse(ast, visitor);
+	while (pending.size) {
+		const owners = [...pending];
+		pending.clear();
 		flattened.clear();
-		traverse(ast, visitor);
-	} while (flattened.size);
+		// A rewrite in an enclosing function can move a waiting function to a new place.
+		const moved = new Set(owners.filter((owner) => !attached(owner)).map((owner) => owner.node));
+		if (moved.size)
+			traverse(ast, {
+				Function(path) {
+					if (moved.delete(path.node)) owners.push(path);
+				},
+			});
+		for (const owner of owners) if (attached(owner)) owner.traverse(visitor);
+	}
 	const optimized = new Set([...transformed.keys(), ...scalarReplace(ast, transformed.keys())]);
 	dedupVariables(optimized);
 	eliminateWrites(optimized);

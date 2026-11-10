@@ -142,6 +142,7 @@ function dependencyPlan(call: NodePath<t.CallExpression>, fn: InlinableFunction)
 		if (!binding) {
 			// A free global must not become a caller's local variable.
 			if (callerBinding) return;
+			if (name !== 'undefined' && name !== 'NaN' && name !== 'Infinity') changing.push(name);
 			continue;
 		}
 		if (!binding.constant || reassignedImport(binding)) changing.push(name);
@@ -203,6 +204,14 @@ function dependencyPlan(call: NodePath<t.CallExpression>, fn: InlinableFunction)
 	// Outer variables the body reads that can change value, by their name in the caller.
 	const mutable = new Set(changing.map((name) => names.get(name) ?? name));
 	return { names, imports, mutable };
+}
+
+/** Whether a call can take the function's body at all, before any of the body is cloned. */
+export function expandable(call: NodePath<t.CallExpression>, fn: InlinableFunction) {
+	return (
+		call.node.arguments.every((argument) => t.isExpression(argument)) &&
+		Boolean(dependencyPlan(call, fn))
+	);
 }
 
 /** Clone a complete function scope so Babel can rename bindings, including destructured locals. */

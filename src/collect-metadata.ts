@@ -294,16 +294,22 @@ export function resolveCall(call: NodePath<t.CallExpression>): InlinableFunction
 	return value && 'func' in value ? value : undefined;
 }
 
-function reassignedExport(filename: string, name: string, depth: number): boolean {
+function reassignedExport(filename: string, name: string, visited: Set<string>): boolean {
+	const key = JSON.stringify([filename, name]);
 	const module = modules.get(filename);
-	if (!module || depth > 4) return false;
+	if (!module || visited.has(key)) return false;
+	visited.add(key);
 	const local = (localName: string) => {
 		const binding = module.scope.getBinding(localName);
-		return Boolean(binding && (!binding.constant || reassignedImport(binding, depth + 1)));
+		return Boolean(binding && (!binding.constant || reassignedImport(binding, visited)));
 	};
 	for (const statement of module.node.body) {
-		if (t.isExportDefaultDeclaration(statement) && name === 'default')
-			return t.isIdentifier(statement.declaration) && local(statement.declaration.name);
+		if (t.isExportDefaultDeclaration(statement) && name === 'default') {
+			const declared = statement.declaration;
+			if (t.isIdentifier(declared)) return local(declared.name);
+			const named = t.isFunctionDeclaration(declared) || t.isClassDeclaration(declared);
+			return Boolean(named && declared.id && local(declared.id.name));
+		}
 		if (!t.isExportNamedDeclaration(statement) || statement.exportKind === 'type') continue;
 		if (statement.declaration && name in t.getOuterBindingIdentifiers(statement.declaration))
 			return local(name);
@@ -315,13 +321,13 @@ function reassignedExport(filename: string, name: string, depth: number): boolea
 			if (exported !== name) continue;
 			if (!statement.source) return local(specifier.local.name);
 			const source = resolveSource(statement.source.value, filename);
-			return Boolean(source && reassignedExport(source, specifier.local.name, depth + 1));
+			return Boolean(source && reassignedExport(source, specifier.local.name, visited));
 		}
 	}
 	return module.node.body.some((statement) => {
 		if (!t.isExportAllDeclaration(statement) || name === 'default') return false;
 		const source = resolveSource(statement.source.value, filename);
-		return Boolean(source && reassignedExport(source, name, depth + 1));
+		return Boolean(source && reassignedExport(source, name, visited));
 	});
 }
 
@@ -329,7 +335,7 @@ function reassignedExport(filename: string, name: string, depth: number): boolea
  * Whether an imported binding can change value because the module that exports it
  * assigns it again. Modules outside the build are taken to export constants.
  */
-export function reassignedImport(binding: Binding, depth = 0): boolean {
+export function reassignedImport(binding: Binding, visited = new Set<string>()): boolean {
 	const specifier = binding.path;
 	if (!specifier.isImportSpecifier() && !specifier.isImportDefaultSpecifier()) return false;
 	const declaration = specifier.parentPath;
@@ -343,7 +349,7 @@ export function reassignedImport(binding: Binding, depth = 0): boolean {
 		: t.isIdentifier(specifier.node.imported)
 			? specifier.node.imported.name
 			: specifier.node.imported.value;
-	return reassignedExport(source, imported, depth);
+	return reassignedExport(source, imported, visited);
 }
 
 export function exportedBindingName(binding: Binding): string | undefined {

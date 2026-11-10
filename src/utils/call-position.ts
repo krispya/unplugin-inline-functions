@@ -1,6 +1,7 @@
 import { NodePath, Scope } from '@babel/traverse';
 import * as t from '@babel/types';
 import { reassignedImport, resolveCall } from '../collect-metadata';
+import { loweredAssignments } from './lower-to-expression';
 
 /** The statement containing an expression, unless a function or class boundary comes first. */
 export function enclosingStatement(path: NodePath): NodePath<t.Statement> | undefined {
@@ -54,7 +55,8 @@ function effectful(path: NodePath) {
 		path.isOptionalCallExpression() ||
 		path.isNewExpression() ||
 		path.isTaggedTemplateExpression() ||
-		path.isAssignmentExpression() ||
+		// A lowered body writes only temporaries of its own.
+		(path.isAssignmentExpression() && !loweredAssignments.has(path.node)) ||
 		path.isUpdateExpression() ||
 		path.isUnaryExpression({ operator: 'delete' }) ||
 		path.isAwaitExpression() ||
@@ -160,6 +162,10 @@ function precedingOperands(
 			return undefined;
 		return earlier.map((property) => (property as t.ObjectProperty).value);
 	}
+	// Earlier properties were counted at the value, one level down.
+	if (parent.isObjectExpression() && child.isObjectProperty()) return [];
+	// The target of an assignment is evaluated ahead of its right side.
+	if (parent.isAssignmentExpression() && key === 'left') return [];
 	if (parent.isAssignmentExpression() && key === 'right') {
 		const { left, operator } = parent.node;
 		// A logical assignment evaluates its right side on some paths only.
@@ -200,7 +206,9 @@ function spillsAt(
 		if (!operand || fixedOperand(operand, stable)) continue;
 		if (t.isSpreadElement(operand) || t.isArgumentPlaceholder(operand)) return;
 		if (!t.isExpression(operand)) return;
-		const path = findChild(child.parentPath!, operand);
+		// Earlier property values belong to sibling properties of an object literal.
+		const parent = child.parentPath!;
+		const path = findOperand(parent.isObjectProperty() ? parent.parentPath! : parent, operand);
 		if (!path) return;
 		spills.push(path);
 	}
@@ -275,7 +283,8 @@ export function registerDeclarations(inserted: NodePath[], count: number) {
 		if (path.isVariableDeclaration()) path.scope.registerDeclaration(path);
 }
 
-function findChild(parent: NodePath, node: t.Node): NodePath<t.Expression> | undefined {
+/** The path of an operand under a parent. Assignment targets and property values sit a level down. */
+function findOperand(parent: NodePath, node: t.Node): NodePath<t.Expression> | undefined {
 	let found: NodePath<t.Expression> | undefined;
 	for (const key of t.VISITOR_KEYS[parent.node.type]) {
 		const value = (parent.node as unknown as Record<string, unknown>)[key];
@@ -285,5 +294,12 @@ function findChild(parent: NodePath, node: t.Node): NodePath<t.Expression> | und
 		} else if (value === node) found = parent.get(key) as NodePath<t.Expression>;
 		if (found) return found;
 	}
-	return;
+	parent.traverse({
+		enter(path) {
+			if (path.node !== node) return;
+			found = path as NodePath<t.Expression>;
+			path.stop();
+		},
+	});
+	return found;
 }

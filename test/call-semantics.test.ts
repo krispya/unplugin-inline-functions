@@ -476,6 +476,41 @@ const flattenedCases: { name: string; source: string; inlined?: string }[] = [
 		name: 'a branch whose body writes a compound assignment target',
 		source: 'let total = 1; /* @inline */ function any(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; total += total ? any(1) : 0; return total; }',
 	},
+	{
+		name: 'an assignment to a member of a variable object',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(w = 1) { let oo = {p: 1}; oo.p = imp(1, w); return oo; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a compound assignment to a member of a variable object',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(w = 1) { let oo = {p: 1}; oo.p += imp(1, w); oo.p ??= imp(2, w); return oo; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'an assignment to an index that changes',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(xs = [1, 2, 3]) { const out = new Array(3); for (let i = 0; i < xs.length; i++) out[i] = imp(1, xs[i]); return out; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a compound assignment to an index that changes',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\nconst h = (a, b) => [a, b];\nfunction run(xs = [1, 2, 3]) { const out = [0, 0, 0]; for (let i = 0; i < xs.length; i++) out[i] += imp(1, xs[i]); return out; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'an object literal after an earlier property',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\nconst h = (a, b) => [a, b];\nfunction run(e = {id: 3}) { return { id: e.id, value: imp(1, e.id) }; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a call in the key of an assignment target',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\nconst h = (a, b) => [a, b];\nfunction run(o = {}) { o[imp(1, 'k')] = 1; return o; }",
+		inlined: 'imp',
+	},
+	{
+		name: 'a pure call around a lowered pure call in a branch',
+		source: "const log = [];\nfunction L(k, x) { log.push('L' + k); return x; }\n/* @inline */ function imp(k, x) { log.push('i' + k); for (let i = 0; i < 2; i++) { if (x === i) return i * 10; } return x; }\n/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; }\n/* @inline @pure */ function sq(x) { return x * x; }\n/* @inline @pure */ function idx(e) { const lo = e & 255; return lo + (e >>> 8); }\nconst h = (a, b) => [a, b];\nfunction run(arr = [1, 2, 3], c = 1) { const out = []; for (let i = 0; i < arr.length; i++) out.push(c ? pur(idx(arr[i])) : 0); return out; }",
+		inlined: 'pur',
+	},
 ];
 
 // Positions with no statement form. The call stays rather than run inside a function.
@@ -690,6 +725,24 @@ describe('branch positions', () => {
 					"export let handler = (x) => ['old', x]; export function install() { handler = (x) => ['new', x]; } export /* @inline */ function step(n) { for (let i = 0; i < n; i++) install(); return 1; }",
 				'main.js':
 					"import {handler, step} from './lib.js'; export function run() { return handler(step(1)); }",
+			},
+			'step'
+		);
+	});
+
+	it('reads an imported callee through a chain of modules that export it again', async () => {
+		await compareBuilds(
+			{
+				'lib.js':
+					"export let handler = (x) => ['old', x]; export function install() { handler = (x) => ['new', x]; } export /* @inline */ function step(n) { for (let i = 0; i < n; i++) install(); return 1; }",
+				'a.js': "export {handler} from './lib.js';",
+				'b.js': "export * from './a.js';",
+				'c.js': "export {handler as live} from './b.js';",
+				'd.js': "export * from './c.js';",
+				'e.js': "export {live} from './d.js';",
+				'f.js': "export * from './e.js';",
+				'main.js':
+					"import {live} from './f.js'; import {step} from './lib.js'; export function run() { return live(step(1)); }",
 			},
 			'step'
 		);
