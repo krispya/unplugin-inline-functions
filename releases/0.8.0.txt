@@ -1,0 +1,76 @@
+unplugin-inline-functions 0.8.0
+
+Highlights
+
+- Never wrap an expansion in a generated function. A closure allocates a
+  context every time the enclosing function runs, including on paths that
+  never reach it. A body that needs statements where only some paths evaluate
+  the call now has the surrounding ?:, &&, || or ?? rewritten as an if
+  statement. Logical assignments and the tests of while and for loops are
+  flattened the same way.
+- Export an alias of each binding a chunk exports, so the chunk's own reads
+  of the binding fold into optimized code instead of loading a module cell
+  on every use. Importers get the same value under the same name.
+- Expand calls in more statement positions: assignments to a member or index
+  with a changing object or key, object literals after an earlier property,
+  a call in the key of an assignment target, and calls whose arguments await
+  or yield.
+- Keep evaluation order when code moves ahead of its statement. Several
+  cases that gave wrong results in 0.7.0 are fixed, listed below.
+
+Behavior and compatibility
+
+Export aliasing is on by default. Set decoupleExports: false to turn it off.
+It runs on ES module chunks from Rollup, Vite and Rolldown. Bindings that are
+assigned again and imports that are exported again keep their live export. A
+chunk that imports another chunk is skipped, since an import cycle could read
+an export before the alias exists.
+
+Positions with no statement form keep the call: operands of an optional chain,
+logical assignments to a computed member, do while tests, for updates, later
+declarators of one declaration, parameter defaults and class fields. A body
+with effects is also kept as a call when it is an argument of a method call,
+because the method is read first. 0.7.0 wrapped these in a function.
+
+A flattened body counts toward the bytecode of the function that contains it.
+The wrapper used to hide that size from the budget, so a function near the
+limit can now keep an expansion as a call where it expanded before.
+
+Evaluation order fixes:
+
+- total += f() reads total into a temporary before a body with effects runs.
+- cache ??= build() no longer runs the body when cache is already set.
+- g(swap(), pure(x)) reads g before swap() runs, and an argument with effects
+  counts against a @pure body.
+- add(bump()) no longer reads an outer variable of add before bump() runs.
+- An imported callee whose module assigns it again is read before a body that
+  triggers the assignment.
+
+The chunk rewrite returns a source map for its own step. The transform hook
+still returns none, so maps through the plugin remain incomplete.
+
+magic-string ^0.30.21 is a new dependency. The minimum Node version remains
+22.13. The package manager remains pnpm 12.16.1, with a declared pnpm engine
+of >=12.0.0.
+
+Validation
+
+- 378 plugin tests, type checking and the ESM/CommonJS declaration build pass.
+- A separate consumer with production dependencies installed from the packed
+  tarball passes all 12 ESM/CommonJS entrypoint checks. The chunk rewrite
+  runs from the packed build and returns a source map.
+- Koota at 036d096d built with this version passes all 583 generated
+  core/React/Svelte tests. All 24 bindings its chunk exports are aliased and
+  no generated closures remain in the bundle.
+
+Manual release
+
+After checking out the prepared release commit on main, run:
+
+  pnpm run release
+
+This command rebuilds and publishes to npm and may request browser
+authentication. Publication has not been performed during preparation.
+
+If creating a GitHub release, use tag v0.8.0 at the release preparation commit.
+No release tag or GitHub release has been created during preparation.
