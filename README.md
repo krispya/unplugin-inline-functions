@@ -319,7 +319,7 @@ Candidates are standalone `=` assignments to initialized local `let`/`var` bindi
 
 ## Scalar scratch tuples
 
-After inlining changes a function, the plugin automatically replaces eligible local numeric tuples of up to 16 components with scalar locals:
+After inlining changes a function, local numeric tuples of up to 16 components are replaced with scalar locals. The allocation and the component loads and stores disappear, and arithmetic keeps its order.
 
 ```js
 /* @inline */ function scale(out, a, factor) {
@@ -336,25 +336,12 @@ function update(out, input, speed) {
 }
 ```
 
-The generated function carries the scratch components in local variables. It eliminates the scratch allocation, component stores and component loads, while retaining writes to `out`. Arithmetic stays in its original order. The pass runs before the bytecode budget is measured, so the budget sees the cleaned result.
+- Mark a declaration `/* @scalar */ const scratch = [0, 0, 0]` to request replacement in a function without inlining, or for a larger tuple. The same safety checks apply.
+- An inlined factory can supply the tuple, such as a `create`, `fromValues` or `clone` helper that expands to a fresh array literal. Its initializer expressions still run once, in order.
+- Every use must be a fixed, in-bounds numeric index in the same function. If the array escapes, is aliased or captured, is passed to a remaining call, or is accessed any other way, the tuple is left unchanged.
+- Typed arrays, sparse arrays, spreads and caller-owned arrays are not supported. Functions with direct `eval` or `with` are skipped.
 
-Use `/* @scalar */ const scratch = [0, 0, 0]` to request replacement in a function without inlining, or for a larger tuple. The annotation uses the same correctness checks. It does not force an unsafe transformation. The automatic size limit keeps the default focused on small vectors and matrices.
-
-Factories selected for inlining can supply the tuple too. This supports math-style `create`, `fromValues` and `clone` helpers, including several declarations in one statement:
-
-```js
-function update(out, x, y, z, speed) {
-	const scratch = fromValues(x, y, z),
-		copy = clone(scratch);
-	scale(out, copy, speed);
-}
-```
-
-The factory must expand to a fresh, nonempty array literal. Its name is not special, and a remaining factory call does not qualify. Initializer expressions, including cloned component reads, execute once in their original order even when the component is unused. Surplus argument effects, throwing getters and anonymous function or class names are preserved. TypeScript assertions and leading sequence expressions around the array are supported. This does not change which functions are selected for inlining.
-
-Every use after inlining must be a fixed, in-bounds numeric index in the same function. Branches and loops retain their original control flow. If the array escapes, an alias or closure captures it, a remaining call receives it, or an access uses a dynamic index, deletion, destructuring target or a method receiver, the entire tuple stays unchanged. Assignments containing function or class definitions are retained to preserve name inference. Functions containing direct `eval` or `with` are also excluded.
-
-Caller-owned scratch arrays, typed arrays, sparse arrays and array spreads are not supported. Use a fresh local tuple when its identity and final contents do not need to leave the function. If optimization is skipped, that local allocation remains. Unannotated arrays outside functions changed by inlining are unaffected.
+The pass runs before the bytecode budget is measured.
 
 ## Inverted control flow
 
@@ -381,39 +368,39 @@ function displayUserInfo(userId) {
 
 ## Calls in branches
 
-An expansion never runs inside a generated function, since a closure allocates each time the enclosing function is entered. A body that fits one expression is spliced in place. Any other body needs statements, so when the call sits where only some paths evaluate it, the plugin rewrites the surrounding expression as control flow first.
+The plugin never wraps an expansion in a generated function, because a closure allocates every time the enclosing function runs. A body that fits one expression is spliced in place. Any other body needs statements, so the surrounding branch becomes control flow first.
 
 ```js
-function has(world, target) {
-    return typeof target === 'number' ? isAlive(world, target) : entityHas(world, target);
+function label(user, fallback) {
+    return user ? format(user) : fallback;
 }
 ```
 
 ```js
-// The conditional becomes a branch and each body returns for itself
-function has(world, target) {
-    if (typeof target === 'number') {
-        // isAlive() body
+function label(user, fallback) {
+    if (user) {
+        // format() body, returning for itself
     }
-    // entityHas() body
+    return fallback;
 }
 ```
 
-This covers `?:`, `&&`, `||` and `??` wherever their value is returned, unused, declared, assigned or passed on, the logical assignments `&&=`, `||=` and `??=`, and the tests of `while` and `for` loops.
+- Covered: `?:`, `&&`, `||`, `??`, the logical assignments `&&=`, `||=` and `??=`, and `while` and `for` tests.
+- Kept as calls: operands of an optional chain, `do while` tests, `for` updates, later declarators, parameter defaults and class fields.
+- Evaluation order is preserved. When code with effects moves ahead of a statement, a callee or compound assignment target the statement already read is saved in a temporary first. A body with effects stays a call as a method argument, such as `out.push(next())`, since the method is read first.
 
-A call stays a call where no statement form exists: operands of an optional chain, a logical assignment to a computed member, the test of `do while`, a `for` update, later declarators of one declaration, parameter defaults and class fields.
-
-Running a body ahead of its statement must not change what the statement already read. An argument with effects counts against a `@pure` body, and moving a branch moves its test and its other arm too. When something with effects moves, an identifier callee and the target of a compound assignment are read into a temporary first, so `total += next()` becomes `const old = total`, the body, then `total = old + result`. A body with effects is kept as a call only where no such read can be taken, as an argument of a method call such as `out.push(next())`, because the method is read first.
-
-The bytecode of a flattened body counts toward the function that contains it, so the budget below sees its true size.
+A flattened body counts toward the bytecode of the function that contains it.
 
 ## Staying within V8's inlining budget
 
-TurboFan and Maglev inline a callee only while its bytecode stays under a size limit, 460 bytes by default, with a cumulative limit per optimized function. Expanding calls at the source level makes functions larger, and a function that crosses the limit stops being inlined into its own callers. The `budget` option keeps that from happening: after transforming a module the plugin compiles it eagerly in a child `node` process with `--print-bytecode`, reads the length of every function, and for each function that fit before expansion but not after, leaves its largest expansion as a call. It repeats until the function fits. Nothing executes during measurement and the child process sees types and module syntax stripped. A function that was already over the limit is left free to expand, since calls inside it cost more than size does.
+TurboFan and Maglev inline a callee only while its bytecode is under a limit, 460 bytes by default. Source-level expansion makes functions larger, and one that crosses the limit stops being inlined into its own callers.
 
-Measurement happens per module, before the bundler folds compile-time constants. Pass the same `define` map you give the bundler so the plugin can drop the same branches, including branches on constants that other modules derive from those defines, such as `export const debug = typeof __DEBUG__ !== 'undefined' ? __DEBUG__ : true`. With `debug: true` the plugin prints every budget decision and, for Rollup, Vite and Rolldown, the bundle functions still over the limit.
+The `budget` option prevents that. After transforming a module, the plugin measures every function's bytecode in a child `node` process and, for each function that fit before expansion but not after, leaves its largest expansion as a call until it fits. Nothing is executed. A function that was already over the limit expands freely.
 
-Measurement adds roughly a hundred milliseconds per transformed module the first time. Sizes are cached by module content under `node_modules/.cache/unplugin-inline-functions`, so later builds only measure modules that changed. Disable measurement with `budget: false` where build time matters more than steady-state shape.
+- Pass the same `define` map you give the bundler, so the plugin drops the same branches before measuring.
+- `debug: true` prints every budget decision and, for Rollup, Vite and Rolldown, the bundle functions still over the limit.
+- Measurement costs about 100 ms per module the first time. Sizes are cached by content under `node_modules/.cache/unplugin-inline-functions`.
+- `budget: false` turns it off.
 
 ## Cold branches
 
