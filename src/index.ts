@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createUnplugin } from 'unplugin';
 import { collectMetadata, resetMetadata } from './collect-metadata';
+import { decoupleExports } from './decouple-exports';
 import { Expansion, inlineFunctions } from './inline-functions';
 import { parseDefines } from './utils/constant-folding';
 import {
@@ -101,6 +102,16 @@ export interface InlineFunctionsOptions {
 	 * @default true
 	 */
 	outlineThrows?: boolean;
+
+	/**
+	 * Export an alias of each binding a chunk exports, so the chunk's own reads of the
+	 * binding fold into optimized code instead of loading a module cell on every use.
+	 * Applies to ES module chunks from Rollup, Vite and Rolldown that import no other
+	 * chunk, and to bindings that are never assigned again.
+	 *
+	 * @default true
+	 */
+	decoupleExports?: boolean;
 
 	/**
 	 * Enable debug logging to help diagnose issues.
@@ -200,6 +211,7 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		budget = {},
 		cache = 'node_modules/.cache/unplugin-inline-functions',
 		outlineThrows = true,
+		decoupleExports: decouple = true,
 		define = {},
 	} = options;
 	const budgetMax = budget === false ? Infinity : (budget.max ?? 460);
@@ -424,6 +436,26 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 		return null;
 	}
 
+	/** The finished chunk is where exports become module cells and where V8 sees sizes. */
+	function renderChunk(
+		code: string,
+		chunk: { fileName: string; imports: string[] },
+		output: { format: string; sourcemap?: unknown },
+		meta?: { chunks?: Record<string, unknown> }
+	) {
+		reportBundle(code);
+		if (!decouple || output.format !== 'es' || /\.d\.[cm]?ts$/.test(chunk.fileName)) return null;
+		// An import cycle can read an export before this chunk has run to the alias.
+		const chunks = meta?.chunks;
+		if (chunk.imports.some((fileName) => !chunks || fileName in chunks)) return null;
+		const edits = decoupleExports(code);
+		if (!edits) return null;
+		return {
+			code: edits.toString(),
+			map: output.sourcemap ? edits.generateMap({ hires: true }) : null,
+		};
+	}
+
 	return {
 		name: 'unplugin-inline-functions',
 		enforce: 'pre',
@@ -574,9 +606,9 @@ export const unplugin = createUnplugin<InlineFunctionsOptions | undefined>((opti
 			logStats();
 		},
 
-		rollup: { renderChunk: reportBundle },
-		vite: { renderChunk: reportBundle },
-		rolldown: { renderChunk: reportBundle },
+		rollup: { renderChunk },
+		vite: { renderChunk },
+		rolldown: { renderChunk },
 	};
 });
 
