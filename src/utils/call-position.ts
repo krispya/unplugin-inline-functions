@@ -21,6 +21,48 @@ export function insertBeforeStatement(statement: NodePath<t.Statement>, nodes: t
 	return target.insertBefore(nodes);
 }
 
+/** A wrapper that passes its operand's value through unchanged. */
+export function transparent(path: NodePath) {
+	return (
+		path.isTSAsExpression() ||
+		path.isTSNonNullExpression() ||
+		path.isTSSatisfiesExpression() ||
+		path.isTSTypeAssertion() ||
+		path.isParenthesizedExpression()
+	);
+}
+
+/** Whether evaluating a node runs nothing that could write state, apart from one given call. */
+export function effectFree(node: t.Node, except?: t.Node) {
+	let free = true;
+	t.traverseFast(node, (child) => {
+		if (child === except) return;
+		if (
+			t.isCallExpression(child) ||
+			t.isOptionalCallExpression(child) ||
+			t.isNewExpression(child) ||
+			t.isTaggedTemplateExpression(child) ||
+			t.isAssignmentExpression(child) ||
+			t.isUpdateExpression(child) ||
+			t.isUnaryExpression(child, { operator: 'delete' }) ||
+			t.isAwaitExpression(child) ||
+			t.isYieldExpression(child)
+		)
+			free = false;
+	});
+	return free;
+}
+
+/** A variable only its own function can write, so code from elsewhere cannot change it. */
+function privateLocal(scope: Scope, name: string) {
+	const binding = scope.getBinding(name);
+	const owner = binding?.scope.getFunctionParent();
+	if (!binding || !owner) return false;
+	return [...binding.referencePaths, ...binding.constantViolations].every(
+		(path) => path.scope.getFunctionParent() === owner
+	);
+}
+
 /** A callee a pure body cannot change between hoisted evaluation and the call. */
 function stableCallee(callee: t.Node) {
 	if (t.isIdentifier(callee)) return true;
@@ -50,6 +92,7 @@ export interface Hoist {
 /**
  * Operands of a parent that evaluate before a child, when the child is evaluated on
  * every path through the parent. Undefined marks a conditional or unsupported position.
+ * Pure says that nothing with effects runs ahead of the parent.
  */
 function precedingOperands(
 	child: NodePath,
@@ -101,22 +144,24 @@ function precedingOperands(
 		return earlier.map((property) => (property as t.ObjectProperty).value);
 	}
 	if (parent.isAssignmentExpression() && key === 'right') {
-		if (t.isIdentifier(parent.node.left)) return [];
-		if (t.isMemberExpression(parent.node.left))
-			return parent.node.left.computed
-				? [parent.node.left.object, parent.node.left.property]
-				: [parent.node.left.object];
+		const { left, operator } = parent.node;
+		// A logical assignment evaluates its right side on some paths only.
+		if (operator === '&&=' || operator === '||=' || operator === '??=') return undefined;
+		// A compound assignment reads its target first, so nothing that could write the
+		// target may run ahead of that read.
+		if (
+			operator !== '=' &&
+			!pure &&
+			!(t.isIdentifier(left) && privateLocal(parent.scope, left.name))
+		)
+			return undefined;
+		if (t.isIdentifier(left)) return [];
+		if (t.isMemberExpression(left))
+			return left.computed ? [left.object, left.property] : [left.object];
 		return undefined;
 	}
 	if (parent.isTemplateLiteral()) return key === 0 ? [] : undefined;
-	if (
-		parent.isTSAsExpression() ||
-		parent.isTSNonNullExpression() ||
-		parent.isTSSatisfiesExpression() ||
-		parent.isTSTypeAssertion() ||
-		parent.isParenthesizedExpression()
-	)
-		return [];
+	if (transparent(parent)) return [];
 	return undefined;
 }
 
@@ -132,7 +177,7 @@ function fixedOperand(node: t.Node, stable: (node: t.Expression) => boolean) {
  * The operands at one level that must move into temporaries before a body can run
  * ahead of the child. Undefined when the child's position cannot be hoisted out of.
  */
-export function spillsAt(
+function spillsAt(
 	child: NodePath,
 	pure: boolean,
 	stable: (node: t.Expression) => boolean
@@ -151,6 +196,29 @@ export function spillsAt(
 	return spills;
 }
 
+export interface Level {
+	spills: NodePath<t.Expression>[];
+	/** Whether everything that runs ahead of the parent is still free of effects. */
+	pure: boolean;
+}
+
+/**
+ * One step outward from a child. A spilled operand with effects runs ahead of the
+ * parent like an impure body would, so the level is then judged as impure.
+ */
+export function hoistLevel(
+	child: NodePath,
+	pure: boolean,
+	stable: (node: t.Expression) => boolean
+): Level | undefined {
+	let spills = spillsAt(child, pure, stable);
+	if (pure && spills?.some((operand) => !effectFree(operand.node))) {
+		pure = false;
+		spills = spillsAt(child, false, stable);
+	}
+	return spills && { spills, pure };
+}
+
 /**
  * The statement an expression's expansion can precede, with the operands that must be
  * evaluated into temporaries first so that nothing is reordered or repeated.
@@ -163,10 +231,11 @@ export function hoistAnchor(
 	const levels: NodePath<t.Expression>[][] = [];
 	let current = expression;
 	while (current.parentPath) {
-		const spills = spillsAt(current, pure, stable);
-		if (!spills) return;
+		const level = hoistLevel(current, pure, stable);
+		if (!level) return;
+		pure = level.pure;
 		const parent = current.parentPath;
-		levels.push(spills);
+		levels.push(level.spills);
 		if (parent.isStatement())
 			return { anchor: parent as NodePath<t.Statement>, spills: levels.reverse().flat() };
 		current = parent;

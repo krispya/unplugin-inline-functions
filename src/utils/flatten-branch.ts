@@ -1,6 +1,13 @@
 import { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
-import { hoistAnchor, insertBeforeStatement, spillOperands, spillsAt } from './call-position';
+import {
+	effectFree,
+	hoistAnchor,
+	hoistLevel,
+	insertBeforeStatement,
+	spillOperands,
+	transparent,
+} from './call-position';
 
 type Stable = (node: t.Expression) => boolean;
 type Branch = NodePath<t.LogicalExpression> | NodePath<t.ConditionalExpression>;
@@ -19,16 +26,6 @@ function inBranch(child: NodePath) {
 function inLoopTest(child: NodePath) {
 	const parent = child.parentPath!;
 	return (parent.isWhileStatement() || parent.isForStatement()) && child.key === 'test';
-}
-
-function transparent(path: NodePath) {
-	return (
-		path.isTSAsExpression() ||
-		path.isTSNonNullExpression() ||
-		path.isTSSatisfiesExpression() ||
-		path.isTSTypeAssertion() ||
-		path.isParenthesizedExpression()
-	);
 }
 
 /** Keep an anonymous function or class from taking the name of the variable that receives it. */
@@ -54,20 +51,20 @@ function continues(operator: t.LogicalExpression['operator'], left: t.Expression
 	return t.binaryExpression('==', left, t.nullLiteral());
 }
 
-/** The right side of a compound assignment, whose target is read before that side runs. */
-function afterTargetRead(child: NodePath) {
-	const parent = child.parentPath!;
-	return parent.isAssignmentExpression() && parent.node.operator !== '=' && child.key === 'right';
-}
-
 /** Whether statements can stand in for every branch and loop test between a call and its statement. */
 function flattens(call: NodePath, pure: boolean, stable: Stable) {
 	let current = call;
+	let ahead = pure;
 	while (current.parentPath) {
-		// A body that writes the target must not move ahead of the read.
-		if (!pure && afterTargetRead(current)) return false;
 		if (inLoopTest(current)) return true;
-		if (!inBranch(current) && !spillsAt(current, pure, stable)) return false;
+		if (inBranch(current)) {
+			// A lifted branch moves whole, so its other operands run ahead with the body.
+			ahead = pure && effectFree(current.parentPath.node, call.node);
+		} else {
+			const level = hoistLevel(current, ahead, stable);
+			if (!level) return false;
+			ahead = level.pure;
+		}
 		if (current.parentPath.isStatement()) return true;
 		current = current.parentPath;
 	}
@@ -99,19 +96,26 @@ function openLoopTest(loop: TestedLoop) {
 	);
 }
 
-function assign(target: t.Identifier, value: t.Expression, assignments: WeakSet<t.Node>) {
+/** Results map each assignment to whether its target already holds another value. */
+function assign(
+	target: t.Identifier,
+	value: t.Expression,
+	results: WeakMap<t.Node, boolean>,
+	holdsValue: boolean
+) {
 	const assignment = t.assignmentExpression('=', t.identifier(target.name), unnamed(value));
-	assignments.add(assignment);
+	results.set(assignment, holdsValue);
 	return t.blockStatement([t.expressionStatement(assignment)]);
 }
 
 /** Replace a conditional or logical expression with an if statement that produces its value. */
 function liftBranch(
 	branch: Branch,
+	call: NodePath,
 	pure: boolean,
 	stable: Stable,
 	snapshots: WeakSet<t.Identifier>,
-	assignments: WeakSet<t.Node>
+	results: WeakMap<t.Node, boolean>
 ) {
 	let host: NodePath = branch;
 	while (transparent(host.parentPath!)) host = host.parentPath!;
@@ -182,7 +186,8 @@ function liftBranch(
 		return true;
 	}
 
-	const hoist = hoistAnchor(branch, pure, stable);
+	// The whole branch moves ahead of the statement, so its other operands count as well.
+	const hoist = hoistAnchor(branch, pure && effectFree(branch.node, call.node), stable);
 	if (!hoist) return false;
 	const anchor = hoist.anchor;
 
@@ -205,15 +210,15 @@ function liftBranch(
 		const { test, consequent, alternate } = branch.node;
 		statement = t.ifStatement(
 			test,
-			assign(target, consequent, assignments),
-			assign(target, alternate, assignments)
+			assign(target, consequent, results, false),
+			assign(target, alternate, results, false)
 		);
 	} else {
 		const { operator, left, right } = branch.node;
 		initial = unnamed(left);
 		statement = t.ifStatement(
 			continues(operator, t.identifier(target.name)),
-			assign(target, right, assignments)
+			assign(target, right, results, true)
 		);
 	}
 	const variable = t.variableDeclaration('let', [t.variableDeclarator(target, initial)]);
@@ -239,7 +244,7 @@ export function flattenBranch(
 	pure: boolean,
 	stable: Stable,
 	snapshots: WeakSet<t.Identifier>,
-	assignments: WeakSet<t.Node>
+	results: WeakMap<t.Node, boolean>
 ) {
 	if (!flattens(call, pure, stable)) return false;
 	let outer: Branch | undefined;
@@ -252,5 +257,5 @@ export function flattenBranch(
 		openLoopTest(current.parentPath as TestedLoop);
 		return true;
 	}
-	return outer ? liftBranch(outer, pure, stable, snapshots, assignments) : false;
+	return outer ? liftBranch(outer, call, pure, stable, snapshots, results) : false;
 }

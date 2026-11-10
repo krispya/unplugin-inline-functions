@@ -482,7 +482,97 @@ const keptCases = [
 	},
 ];
 
+// Evaluation order around code that moves ahead of its statement.
+const orderCases = [
+	{
+		name: 'and around a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [1].length; const a = ok && find([0]); return [a]; }',
+	},
+	{
+		name: 'or around a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [].length; const a = ok || find([0]); return [a]; }',
+	},
+	{
+		name: 'nullish around a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [null][0]; const a = ok ?? find([0]); return [a]; }',
+	},
+	{
+		name: 'a passed on value from a body that ends without returning',
+		source: '/* @inline */ function find(xs) { for (const x of xs) if (x > 1) return x; } function run() { const ok = [1].length; return [[ok && find([0])]]; }',
+	},
+	{
+		name: 'a pure body beside an arm that writes a compound target',
+		source: 'let total = 1; function bump() { total += 10; return 1; } /* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { total = 1; const flag = [].length; total += flag ? any([1]) : bump(); return total; }',
+	},
+	{
+		name: 'a pure body under a test that writes a compound target',
+		source: 'let total = 1; function bump() { total += 10; return 1; } /* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { total = 1; total += bump() ? any([1]) : 0; return total; }',
+	},
+	{
+		name: 'a pure body under a test that swaps the callee',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { let f = (x) => x; function swap() { f = (x) => [x]; return 1; } return f(swap() ? any([1]) : 0); }',
+	},
+	{
+		name: 'a pure body beside an arm that swaps the method',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { const o = { m: (x) => x, swap() { this.m = (x) => [x]; return 1; } }; const flag = [].length; return o.m(flag ? any([1]) : o.swap()); }',
+	},
+	{
+		name: 'a nullish assignment that is already set',
+		source: 'let hits = 0; /* @inline */ function build(n) { for (let i = 0; i < n; i++) hits++; return hits; } function run() { hits = 0; let cache = 5; cache ??= build(3); return [cache, hits]; }',
+	},
+	{
+		name: 'a branch inside an or assignment that is already set',
+		source: 'let hits = 0; /* @inline */ function build(n) { for (let i = 0; i < n; i++) hits++; return hits; } function run() { hits = 0; let cache = 5; const c = [1].length; cache ||= c ? build(3) : 0; return [cache, hits]; }',
+	},
+	{
+		name: 'a test with effects inside an and assignment that is unset',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { let n = 0; let cache = 0; cache &&= n++ ? any([1]) : 0; return [cache, n]; }',
+	},
+	{
+		name: 'argument effects inside an or assignment that is already set',
+		source: '/* @inline @pure */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; } function run() { let n = 0; let cache = 1; cache ||= any([n++]); return [cache, n]; }',
+	},
+	{
+		name: 'a compound assignment whose target the body writes',
+		source: 'let total = 1; /* @inline */ function any(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; total += any(1); return total; }',
+	},
+	{
+		name: 'a compound assignment in a loop test beside a writer',
+		source: 'let total = 1; function bump() { total += 10; return 1; } /* @inline */ function any(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; } function run() { total = 1; let n = 0; while ((total += bump() + any(2)) < 30 && n++ < 5) {} return [total, n]; }',
+	},
+	{
+		name: 'a compound assignment reached through an opened loop test',
+		source: 'let total = 1; /* @inline */ function ready(q) { for (const v of q) if (v) return true; return false; } /* @inline */ function grow(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; let n = 0; while (ready([1]) && (total += grow(1)) < 40 && n++ < 9) {} return [total, n]; }',
+	},
+	{
+		name: 'a callee swapped by an earlier argument of a pure call',
+		source: "/* @inline @pure */ function pur(x) { let s = 0; for (let i = 0; i < 2; i++) s += x; if (s > 2) return s; return 0; } function run() { let g = (a, b) => [a, b, 'g']; function M() { g = (a, b) => [b, a, 'G']; return 1; } const y = g(M(), pur(2)); return y; }",
+	},
+	{
+		name: 'a callee swapped by the body',
+		source: 'let f = (x) => x; /* @inline */ function swap(xs) { for (const x of xs) f = (y) => [y, x]; return 1; } function run() { f = (x) => x; return f(swap([1])); }',
+	},
+];
+
 describe('branch positions', () => {
+	it.each(orderCases)('keeps the order of $name', async ({ source }) => {
+		const result = await compareBuilds({
+			'main.js': `${source}
+export {run};`,
+		});
+		expect(result.code).not.toContain('(() => {');
+	});
+
+	it('expands a body into a compound assignment to a variable only the caller can write', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} export function run() { let total = 1; total += any([0, 1]) ? 2 : 0; total += [1].length ? any([1]) : 0; return total; }`,
+			},
+			'any'
+		);
+		expect(result.code).not.toContain('(() => {');
+	});
+
 	it.each(flattenedCases)('flattens $name', async ({ source, inlined }) => {
 		const result = await compareBuilds(
 			{ 'main.js': `${source}\nexport {run};` },

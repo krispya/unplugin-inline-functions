@@ -124,7 +124,7 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 	const initializedSnapshots = new WeakSet<t.Identifier>();
 	const loweredParameters = new WeakSet<t.Identifier>();
 	const flatExpansions = new Map<string, boolean>();
-	const branchResults = new WeakSet<t.Node>();
+	const branchResults = new WeakMap<t.Node, boolean>();
 	// Scope crawls discard UID reservations for labels in nested blocks. Keep an
 	// independent reservation set for the lifetime of this module's transformation.
 	const labels = new Set<string>();
@@ -163,13 +163,14 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 				body.replaceWith(t.blockStatement([t.returnStatement(body.node as t.Expression)]));
 		},
 	});
-	// Flattening a branch moves code that this walk has yet to reach, so the walk starts
-	// over and meets the call again where its body can run in place.
-	let flattened = false;
+	// Flattening a branch moves code that this walk has yet to reach. The rest of that
+	// function waits for the next walk, which meets the call where its body can run in place.
+	const flattened = new Set<t.Node>();
 	const visitor: Visitor = {
 		CallExpression: {
 			exit(path) {
-				if (flattened) return;
+				if (flattened.size && path.findParent((ancestor) => flattened.has(ancestor.node)))
+					return;
 				const fn = resolveCall(path);
 				if (!fn) return;
 				if (
@@ -361,10 +362,8 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					// Any other body needs statements. The enclosing branch or loop test becomes
 					// statements and the next walk expands the call there. Wrapping the body in a
 					// function would allocate on every pass, so with no statement form the call stays.
-					if (flattenBranch(path, fn.pure, settled, initializedSnapshots, branchResults)) {
-						flattened = true;
-						path.stop();
-					}
+					if (flattenBranch(path, fn.pure, settled, initializedSnapshots, branchResults))
+						flattened.add((parentFunction ?? path.scope.getProgramParent().path).node);
 					return;
 				}
 				commit();
@@ -433,13 +432,24 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 					return;
 				}
 
-				// A flattened branch receives the result directly.
-				if (
-					parent.isAssignmentExpression() &&
-					branchResults.has(parent.node) &&
-					anchor === parent.parentPath
-				) {
-					anchor.replaceWith(frame(parent.node.left as t.Identifier)[0]);
+				// A flattened branch receives the result directly. The target of a logical
+				// branch holds the left operand, which a body that ends without returning clears.
+				const holdsValue = branchResults.get(parent.node);
+				if (holdsValue !== undefined && anchor === parent.parentPath) {
+					const target = (parent.node as t.AssignmentExpression).left as t.Identifier;
+					const clear =
+						holdsValue && !terminates(t.blockStatement(body.body))
+							? [
+									t.expressionStatement(
+										t.assignmentExpression(
+											'=',
+											t.cloneNode(target),
+											undefinedValue()
+										)
+									),
+								]
+							: [];
+					anchor.replaceWithMultiple([...clear, ...frame(target)]);
 					return;
 				}
 
@@ -477,9 +487,9 @@ export function inlineFunctions(ast: ParseResult<t.File>, options: InlineOptions
 		},
 	};
 	do {
-		flattened = false;
+		flattened.clear();
 		traverse(ast, visitor);
-	} while (flattened);
+	} while (flattened.size);
 	const optimized = new Set([...transformed.keys(), ...scalarReplace(ast, transformed.keys())]);
 	dedupVariables(optimized);
 	eliminateWrites(optimized);
