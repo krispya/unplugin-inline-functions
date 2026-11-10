@@ -53,16 +53,6 @@ magic-string ^0.30.21 is a new dependency. The minimum Node version remains
 22.13. The package manager remains pnpm 12.16.1, with a declared pnpm engine
 of >=12.0.0.
 
-Validation
-
-- 378 plugin tests, type checking and the ESM/CommonJS declaration build pass.
-- A separate consumer with production dependencies installed from the packed
-  tarball passes all 12 ESM/CommonJS entrypoint checks. The chunk rewrite
-  runs from the packed build and returns a source map.
-- Koota at 036d096d built with this version passes all 583 generated
-  core/React/Svelte tests. All 24 bindings its chunk exports are aliased and
-  no generated closures remain in the bundle.
-
 Manual release
 
 After checking out the prepared release commit on main, run:
