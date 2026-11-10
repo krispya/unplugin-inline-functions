@@ -392,6 +392,147 @@ describe('call semantics', () => {
 	});
 });
 
+const any =
+	'/* @inline */ function any(items) { for (let i = 0; i < items.length; i++) if (items[i]) return true; return false; }';
+const positive =
+	'/* @inline */ function positive(n) { if (n < 0) throw new Error("negative"); return n > 0; }';
+
+// Bodies that need statements, at positions only some paths evaluate.
+const flattenedCases: { name: string; source: string; inlined?: string }[] = [
+	{
+		name: 'a returned conditional',
+		source: `${any} function pick(c, xs) { return c ? xs.length : any(xs); } function run() { return [pick(true, [1]), pick(false, [0, 2]), pick(false, [0])]; }`,
+	},
+	{
+		name: 'returned logical operands',
+		source: `${any} function run() { const log = []; function and(a, xs) { return a && any(xs); } function or(xs) { return log.push(1) > 2 || any(xs); } function nullish(a, xs) { return a ?? any(xs); } return [and(0, [1]), and(1, [1]), or([0]), or([1]), or([0]), nullish(0, [1]), nullish(null, [1]), log]; }`,
+	},
+	{
+		name: 'unused values',
+		source: '/* @inline */ function any(out, n) { for (let i = 0; i < n; i++) out.push(i); } function run() { const out = []; const c = out.length; c && any(out, 9); c || any(out, 2); c ? any(out, 9) : 0; c ? 0 : any(out, 1); out[9] ?? any(out, 1); return out; }',
+	},
+	{
+		name: 'nested conditionals',
+		source: `${any} function pick(a, b, xs) { return a ? (b ? any(xs) : 1) : 2; } function run() { return [pick(1, 1, [1]), pick(1, 1, [0]), pick(1, 0, [1]), pick(0, 1, [1])]; }`,
+	},
+	{
+		name: 'a conditional argument between effectful operands',
+		source: `${any} function run() { const log = []; function next() { log.push(log.length); return log.length; } function list(a, b, c) { return [a, b, c]; } return [list(next(), log.length ? any([1]) : 0, next()), log]; }`,
+	},
+	{
+		name: 'declared and assigned values',
+		source: `${any} function run() { const log = []; const a = log.push(1) && any([0, 1]); let b; b = log.length > 5 ? 0 : any([0]); const c = [log.length ? any([1]) : 0]; return [a, b, c, log]; }`,
+	},
+	{
+		name: 'anonymous functions beside a flattened branch',
+		source: `${positive} function run() { const yes = [1].length; const a = yes ? () => 1 : positive(0); const b = [yes ? () => 1 : positive(0)]; return [a.name, b[0].name]; }`,
+		inlined: 'positive',
+	},
+	{
+		name: 'a while test',
+		source: '/* @inline */ function any(q) { for (const v of q) if (v > 0) return true; return false; } function run() { const q = [3, 2, 1]; const out = []; while (any(q)) { const v = q.shift(); if (v === 2) continue; out.push(v); q.push(0); if (out.length > 5) break; } return out; }',
+	},
+	{
+		name: 'a for test with fresh bindings on each pass',
+		source: '/* @inline */ function any(q, i) { for (const v of q) if (v > i) return true; return false; } function run() { const out = []; const reads = []; for (let i = 0; i < 9 && any([1, 2, 3], i); i++) { if (i === 1) continue; out.push(i); reads.push(() => i); } return [out, reads.map((read) => read())]; }',
+	},
+	{
+		name: 'an and chain in a loop test',
+		source: '/* @inline */ function any(q) { for (const v of q) if (v > 0) return true; return false; } function run() { const q = [3, 2, 1, 0]; const out = []; while (out.length < 2 && any(q) && q.length) out.push(q.shift()); return out; }',
+	},
+	{
+		name: 'if tests',
+		source: `${any} function kind(a, xs) { if (a > 5) return "big"; else if (a && any(xs)) return "any"; if (a < 0 || any(xs)) return "or"; if (a && any(xs)) { return "and"; } else return "none"; } function run() { return [kind(9, []), kind(1, [1]), kind(1, [0]), kind(0, [1]), kind(-1, [0]), kind(0, [0])]; }`,
+	},
+	{
+		name: 'switch cases, bare branches and concise arrows',
+		source: `${any} function pick(k, xs) { switch (k) { case 1: return xs.length ? any(xs) : -1; default: if (k) return k > 2 && any(xs); } return 0; } function run() { return [pick(1, [1]), pick(1, []), pick(3, [0]), pick(2, [1]), pick(0, [1]), [[1], [0], []].map((xs) => xs.length && any(xs))]; }`,
+	},
+	{
+		name: 'a branch beside await',
+		source: `${any} async function run() { const a = (await 1) ? any([1]) : await 2; const b = (await 0) || any([0]); return [a, b]; }`,
+	},
+];
+
+// Positions with no statement form. The call stays rather than run inside a function.
+const keptCases = [
+	{
+		name: 'an optional chain operand',
+		source: `${any} function run() { const none = null; const some = {a: 1, b: 2}; return [none?.[any([1])], some?.[any([1]) ? "a" : "b"]]; }`,
+	},
+	{
+		name: 'a do while test',
+		source: `${any} function run() { const q = [1, 0]; let n = 0; do { q.shift(); n++; } while (any(q)); return n; }`,
+	},
+	{
+		name: 'a for update',
+		source: `${any} function run() { const out = []; for (let i = 0, found = false; i < 3; found = any([i]), i++) out.push(found); return out; }`,
+	},
+	{
+		name: 'a later declarator',
+		source: `${any} function run() { const first = [0, 1], found = any(first); return found; }`,
+	},
+	{
+		name: 'a parameter default',
+		source: `${any} function run() { function read(found = any([0, 1])) { return found; } return [read(), read(0)]; }`,
+	},
+	{
+		name: 'a branch whose body writes a compound assignment target',
+		source: 'let total = 1; /* @inline */ function any(n) { for (let i = 0; i < n; i++) total += 10; return 1; } function run() { total = 1; total += total ? any(1) : 0; return total; }',
+	},
+];
+
+describe('branch positions', () => {
+	it.each(flattenedCases)('flattens $name', async ({ source, inlined }) => {
+		const result = await compareBuilds(
+			{ 'main.js': `${source}\nexport {run};` },
+			inlined ?? 'any'
+		);
+		expect(result.code).not.toContain('(() => {');
+	});
+
+	it.each(keptCases)('keeps the call at $name', async ({ source }) => {
+		const result = await compareBuilds({ 'main.js': `${source}\nexport {run};` });
+		expect(result.code).toMatch(/(?<!function )\bany\s*\(/);
+		expect(result.code).not.toContain('(() => {');
+	});
+
+	it('returns from each path of a returned branch without a result variable', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} function pick(c, xs) { return c ? xs.length : any(xs); } export function run() { return [pick(1, [1]), pick(0, [1])]; }`,
+			},
+			'any'
+		);
+		const caller = result.code.slice(result.code.indexOf('function pick('));
+		expect(caller).not.toContain('_result');
+		expect(caller).not.toContain('_inline');
+		expect(caller).not.toContain('_branch');
+	});
+
+	it('assigns a declared variable directly on each path', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} export function run() { const log = []; const value = log.push(1) && any([0, 1]); return [value, log]; }`,
+			},
+			'any'
+		);
+		const caller = result.code.slice(result.code.indexOf('function run('));
+		expect(caller).not.toContain('_result');
+		expect(caller).not.toContain('_branch');
+	});
+
+	it('nests an and that guards a lone consequent', async () => {
+		const result = await compareBuilds(
+			{
+				'main.js': `${any} function kind(a, xs) { if (a && any(xs)) { return "any"; } return "none"; } export function run() { return [kind(1, [1]), kind(1, [0]), kind(0, [1])]; }`,
+			},
+			'any'
+		);
+		expect(result.code.slice(result.code.indexOf('function kind('))).not.toContain('_branch');
+	});
+});
+
 const moduleCases: { name: string; files: Record<string, string> }[] = [
 	{
 		name: 'same function names in different modules resolve independently',

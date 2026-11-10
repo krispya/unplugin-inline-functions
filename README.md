@@ -379,6 +379,30 @@ function displayUserInfo(userId) {
 }
 ```
 
+## Calls in branches
+
+An expansion never runs inside a generated function, since a closure allocates each time the enclosing function is entered. A body that fits one expression is spliced in place. Any other body needs statements, so when the call sits where only some paths evaluate it, the plugin rewrites the surrounding expression as control flow first.
+
+```js
+function has(world, target) {
+    return typeof target === 'number' ? isAlive(world, target) : entityHas(world, target);
+}
+```
+
+```js
+// The conditional becomes a branch and each body returns for itself
+function has(world, target) {
+    if (typeof target === 'number') {
+        // isAlive() body
+    }
+    // entityHas() body
+}
+```
+
+This covers `?:`, `&&`, `||` and `??` wherever their value is returned, unused, declared, assigned or passed on, and the tests of `while` and `for` loops. A few positions have no statement form and keep the call: operands of an optional chain, the test of `do while`, a `for` update, later declarators of one declaration and parameter defaults. A body that is not `@pure` also stays a call inside a compound assignment such as `total += ready ? next() : 0`, because the target is read before the body may write it.
+
+The bytecode of a flattened body counts toward the function that contains it, so the budget below sees its true size.
+
 ## Staying within V8's inlining budget
 
 TurboFan and Maglev inline a callee only while its bytecode stays under a size limit, 460 bytes by default, with a cumulative limit per optimized function. Expanding calls at the source level makes functions larger, and a function that crosses the limit stops being inlined into its own callers. The `budget` option keeps that from happening: after transforming a module the plugin compiles it eagerly in a child `node` process with `--print-bytecode`, reads the length of every function, and for each function that fit before expansion but not after, leaves its largest expansion as a call. It repeats until the function fits. Nothing executes during measurement and the child process sees types and module syntax stripped. A function that was already over the limit is left free to expand, since calls inside it cost more than size does.

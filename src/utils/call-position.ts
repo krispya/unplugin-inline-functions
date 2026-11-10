@@ -85,8 +85,11 @@ function precedingOperands(
 	}
 	if (parent.isCallExpression() || parent.isNewExpression()) {
 		if (key === 'callee') return [];
-		if (!fixedCallee(parent.node.callee, parent.scope, pure)) return undefined;
-		return parent.node.arguments.slice(0, key as number);
+		const callee = parent.node.callee;
+		const earlier = parent.node.arguments.slice(0, key as number);
+		if (fixedCallee(callee, parent.scope, pure)) return earlier;
+		// An identifier callee has no receiver, so its value can wait in a temporary.
+		return t.isIdentifier(callee) && callee.name !== 'eval' ? [callee, ...earlier] : undefined;
 	}
 	if (parent.isArrayExpression()) return parent.node.elements.slice(0, key as number);
 	if (parent.isObjectProperty() && key === 'value' && !parent.node.computed) {
@@ -126,35 +129,61 @@ function fixedOperand(node: t.Node, stable: (node: t.Expression) => boolean) {
 }
 
 /**
- * The statement a call's expansion can precede, with the operands that must be
+ * The operands at one level that must move into temporaries before a body can run
+ * ahead of the child. Undefined when the child's position cannot be hoisted out of.
+ */
+export function spillsAt(
+	child: NodePath,
+	pure: boolean,
+	stable: (node: t.Expression) => boolean
+): NodePath<t.Expression>[] | undefined {
+	const operands = precedingOperands(child, pure);
+	if (!operands) return;
+	const spills: NodePath<t.Expression>[] = [];
+	for (const operand of operands) {
+		if (!operand || fixedOperand(operand, stable)) continue;
+		if (t.isSpreadElement(operand) || t.isArgumentPlaceholder(operand)) return;
+		if (!t.isExpression(operand)) return;
+		const path = findChild(child.parentPath!, operand);
+		if (!path) return;
+		spills.push(path);
+	}
+	return spills;
+}
+
+/**
+ * The statement an expression's expansion can precede, with the operands that must be
  * evaluated into temporaries first so that nothing is reordered or repeated.
  */
 export function hoistAnchor(
-	call: NodePath<t.CallExpression>,
+	expression: NodePath,
 	pure: boolean,
 	stable: (node: t.Expression) => boolean
 ): Hoist | undefined {
 	const levels: NodePath<t.Expression>[][] = [];
-	let current: NodePath = call;
+	let current = expression;
 	while (current.parentPath) {
-		const operands = precedingOperands(current, pure);
-		if (!operands) return;
+		const spills = spillsAt(current, pure, stable);
+		if (!spills) return;
 		const parent = current.parentPath;
-		const spills: NodePath<t.Expression>[] = [];
-		for (const operand of operands) {
-			if (!operand || fixedOperand(operand, stable)) continue;
-			if (t.isSpreadElement(operand) || t.isArgumentPlaceholder(operand)) return;
-			if (!t.isExpression(operand)) return;
-			const path = findChild(parent, operand);
-			if (!path) return;
-			spills.push(path);
-		}
 		levels.push(spills);
 		if (parent.isStatement())
 			return { anchor: parent as NodePath<t.Statement>, spills: levels.reverse().flat() };
 		current = parent;
 	}
 	return;
+}
+
+/** Move the operands a hoist must evaluate early into constants, in evaluation order. */
+export function spillOperands(hoist: Hoist, snapshots: WeakSet<t.Identifier>) {
+	const statements: t.Statement[] = [];
+	for (const operand of hoist.spills) {
+		const id = operand.scope.generateUidIdentifier('operand');
+		snapshots.add(id);
+		statements.push(t.variableDeclaration('const', [t.variableDeclarator(id, operand.node)]));
+		operand.replaceWith(t.cloneNode(id));
+	}
+	return statements;
 }
 
 function findChild(parent: NodePath, node: t.Node): NodePath<t.Expression> | undefined {
